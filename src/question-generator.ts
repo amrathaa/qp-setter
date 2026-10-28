@@ -13,7 +13,14 @@ export const isCaseBasedSection = (section: { marks: number; caseBased?: boolean
   section.caseBased ?? section.marks === 4;
 
 // Sentences that only make sense inside the textbook's own narration ("Let us...", "Can you think...").
-const narrationPattern = /\([a-d]\)|^(it|this|these|that|those|they|he|she|we|let|can|think|but|and|or|so|now|here|on the other hand|however|such|therefore|thus|hence|similarly|also|compare|observe|take|find|look|draw|discuss|try|note|see|place|collect|consider|imagine)\b|\bto think of\b|\b(we|us|our|you|your|let's)\b|\b(classroom|next chapter|previous chapter|class\s+(?:ix|viii|x)|activity|figure|fig\.)/i;
+const narrationPattern = /\([a-d]\)|^(it|this|these|that|those|they|he|she|we|let|can|think|but|and|or|so|now|here|on the other hand|however|such|therefore|thus|hence|similarly|also|compare|observe|take|find|look|draw|discuss|try|note|see|place|collect|consider|imagine|arrange|for this|never|always|do not|now|add|put|mix|pour|heat|dip|stir|repeat|record|cover|balance|name|state|give|write|explain|define|list|identify|describe|mention|what|which|why|how)\b|\bto think of\b|\b(we|us|our|you|your|let's)\b|\b(classroom|next chapter|previous chapter|class\s+(?:ix|viii|x)|activity|activities|figure|fig\.)|\b(chapter|section|table)\s+\d/i;
+
+// Chemical equations lose their subscripts in PDF text ("CaCO s Ca(HCO aq3 3( ) )"), so they are left out.
+const garbledEquation = (sentence: string) => {
+  if (/→|←|⇌|\(\s*\)|\((?:aq|s|l|g)\)/.test(sentence)) return true;
+  const tokens = sentence.split(/\s+/);
+  return tokens.filter((token) => /^[A-Za-z0-9()+–-]{1,2}$/.test(token)).length / tokens.length > 0.25;
+};
 
 /**
  * Extracts clean sentences from raw textbook text for question drafting.
@@ -39,6 +46,7 @@ function extractTextbookSentences(text: string): string[] {
         sentence.length <= 220 &&
         !/^(activity|figure|fig\.?|table|question|exercise|page|chapter)\b/i.test(sentence) &&
         !/\bReprint\s+\d{4}/i.test(sentence) &&
+        !garbledEquation(sentence) &&
         /^[A-Z]/.test(sentence) &&
         /[a-zA-Z]{3,}/.test(sentence),
     );
@@ -60,11 +68,30 @@ export function cleanTopicName(topic: string): string {
     .replace(/\bDna\b/g, "DNA");
 }
 
+/**
+ * A heading phrased as a question ("3.2.2 What happens when Metals react with Water?") in sentence
+ * case, so it can be asked directly; null for ordinary headings. Terms like "pH" or "DNA" keep their capitals.
+ */
+export const askedHeading = (topicRaw: string): string | null => {
+  const heading = cleanTopicName(topicRaw);
+  if (!/\?$/.test(heading)) return null;
+  return heading
+    .split(" ")
+    .map((word, index) => {
+      if (index === 0) return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+      return /[A-Z]/.test(word.slice(1)) ? word : word.toLowerCase();
+    })
+    .join(" ");
+};
+
 // Topics are dropped mid-sentence ("Explain the importance of variation"), so a leading article is lower-cased.
 const topicForSentence = (topicRaw: string) =>
-  (cleanTopicName(topicRaw) || "the key concept").replace(/^(The|A|An)\s/, (article) => article.toLowerCase());
+  (cleanTopicName(topicRaw) || "the key concept")
+    // "Understanding the Chemical Properties of..." / "More About Salts" read as their subject.
+    .replace(/^(understanding|introduction to|more about|about)\s+(the\s+)?/i, "")
+    .replace(/^(The|A|An)\s/, (article) => article.toLowerCase());
 
-const commonWords = new Set(`about above after again against almost along already also although always among another answer anything around because become becomes been before being below between beyond both called cannot cases certain change changes common could different does doing done during each early either enough especially even every example fact first following form found from further given great happen happens having however important instance into itself known large larger later least less level like likely little made main make makes making many might more most much must namely nature necessary need needs never number often only other others otherwise over part particular parts place possible present process processes produce produced rather really reason result same seen several shall should show shown similar simple since single small some something sometimes specific still such take taken than that their them themselves then there therefore these they thing things think this those though three through thus time together turn under until upon used useful using usually various very what when where whether which while whole whose will with within without would years`.split(/\s+/));
+const commonWords = new Set(`activity activities chapter figure similarly table contains provides includes requires involves produces becomes remains appears occurs depends consists forms gives takes shows uses aboutabove after again against almost along already also although always among another answer anything around because become becomes been before being below between beyond both called cannot cases certain change changes common could different does doing done during each early either enough especially even every example fact first following form found from further given great happen happens having however important instance into itself known large larger later least less level like likely little made main make makes making many might more most much must namely nature necessary need needs never number often only other others otherwise over part particular parts place possible present process processes produce produced rather really reason result same seen several shall should show shown similar simple since single small some something sometimes specific still such take taken than that their them themselves then there therefore these they thing things think this those though three through thus time together turn under until upon used useful using usually various very what when where whether which while whole whose will with within without would years`.split(/\s+/));
 
 type KeyTerm = { term: string; proper: boolean; score: number };
 const vocabularyCache = new WeakMap<string[], Map<string, KeyTerm>>();
@@ -98,7 +125,7 @@ function keyTermVocabulary(sentences: string[]): Map<string, KeyTerm> {
   const vocabulary = new Map<string, KeyTerm>();
   for (const [key, entry] of counts) {
     // Proper names are single capitalised words (Hydra, Plasmodium), not "DNA-copying".
-    const proper = entry.properCount > 0 && entry.properCount >= entry.count / 2 && /^[A-Z][a-z]+$/.test(entry.surface);
+    const proper = entry.properCount > 0 && entry.properCount === entry.count && /^[A-Z][a-z]+$/.test(entry.surface);
     // Technical terms recur a few times; very frequent words are usually generic.
     if (entry.count > 25 || (!proper && entry.count < 2)) continue;
     // Blanks and options should be nouns; skip adverb/verb/adjective-looking words.
@@ -231,6 +258,21 @@ function draftQuestion(
   // Written questions quote a textbook sentence about the topic; with none available they ask about the topic itself.
   const quote = sourceSentenceRaw.trim() ? `"${sentence.replace(/\.$/, "")}."` : "";
 
+  // A question-style heading ("How do metals react with water?") is asked directly.
+  const asked = askedHeading(topicRaw);
+  if (asked && marks === 2) {
+    if (difficulty === "Easy") return { text: `${asked} Answer briefly.`, marks };
+    if (difficulty === "Advanced") return { text: `${asked} Give two reasons.`, marks };
+    if (difficulty === "Application") return { text: `${asked} Give one example from daily life.`, marks };
+    return { text: quote ? `${asked} Answer in two points, using the statement: ${quote}` : `${asked} Answer in two points.`, marks };
+  }
+  if (asked && marks === 3) {
+    if (difficulty === "Easy") return { text: `${asked} Answer in three points.`, marks };
+    if (difficulty === "Advanced") return { text: `${asked} Explain, and state one exception or limitation.`, marks };
+    if (difficulty === "Application") return { text: `${asked} Describe an activity or everyday situation that shows this.`, marks };
+    return { text: quote ? `${asked} Explain with reference to the statement ${quote} Give an example.` : `${asked} Explain with an example.`, marks };
+  }
+
   // 2-Mark Questions (Very Short Answer)
   if (marks === 2) {
     if (quote) {
@@ -303,6 +345,17 @@ function draftQuestion(
       ? `Discuss the following statement with suitable examples: ${altQuote}`
       : `Discuss ${topic} with suitable examples.`;
   }
+  if (asked) {
+    const extra = quote ? ` Include an explanation of the statement ${quote}` : "";
+    mainText = difficulty === "Easy"
+      ? `${asked} Describe in detail, with a labelled diagram or equations where relevant.${extra}`
+      : difficulty === "Advanced"
+        ? `${asked} (a) Explain in detail. (b) Compare it with a related process or reaction. (c) Discuss its importance.${extra}`
+        : difficulty === "Application"
+          ? `${asked} Describe an activity or experiment that shows this, and the result you would expect.${extra}`
+          : `${asked} Explain in detail with examples, writing equations or drawing diagrams where relevant.${extra}`;
+    if (!altQuote) altText = `Write a detailed note that answers the question: ${asked}`;
+  }
 
   return {
     text: mainText,
@@ -321,7 +374,9 @@ function topicKeyWord(topic: string, sentences: string[]): string | undefined {
   return cleanTopicName(topic)
     .toLowerCase()
     .split(/\s+/)
-    .filter((w) => w.length > 3)
+    .map((w) => w.replace(/[^a-z-]/g, ""))
+    // Question headings ("What happens when metals react with water?") carry words that match everything.
+    .filter((w) => w.length > 3 && !commonWords.has(w) && !/^(with|what|when|does|have|happens|each|really|more|about|from|into)$/.test(w))
     .map((word) => ({ word, count: lowerSentences.filter((s) => s.includes(word)).length }))
     .filter((entry) => entry.count > 0)
     .sort((a, b) => a.count - b.count)[0]?.word;
@@ -331,7 +386,7 @@ function topicKeyWord(topic: string, sentences: string[]): string | undefined {
 const passageSentenceOk = (sentence: string) =>
   /\.$/.test(sentence) &&
   !/\([a-d]\)|\b(activity|figure|fig\.?|exercise)\b|\(fig/i.test(sentence) &&
-  !/^(place|note|take|observe|look|find|try|draw|discuss|let|keep|cut|put|add|remove|collect|compare)\b/i.test(sentence) &&
+  !/^(place|note|take|observe|look|find|try|draw|discuss|let|keep|cut|put|add|remove|collect|compare|now|write|balance|mix|pour|heat|dip|stir|repeat|record)\b/i.test(sentence) &&
   !/\b(you|your|we|us|let's)\b/i.test(sentence) &&
   (sentence.match(/\(/g) || []).length === (sentence.match(/\)/g) || []).length;
 
@@ -350,6 +405,7 @@ export function generateCaseQuestion(
 ): GeneratedQuestion | null {
   if (marks < 3) return null;
   const topic = topicForSentence(topicRaw);
+  const asked = askedHeading(topicRaw);
   const ordered = extractTextbookSentences(textbookText);
   const allSentences = extractCleanSentences(textbookText);
   const keyWord = topicKeyWord(topicRaw, ordered);
@@ -427,14 +483,14 @@ export function generateCaseQuestion(
     text: `Read the passage given below and answer the questions that follow.\n${passage.join(" ")}`,
     marks,
     parts: [
-      { ...(partOne || { text: `State one fact about ${topic} given in the passage.`, answer: passage[0] }), marks: 1 },
+      { ...(partOne || { text: asked ? "State one fact given in the passage." : `State one fact about ${topic} given in the passage.`, answer: passage[0] }), marks: 1 },
       { ...(partTwo || { text: `Name the process described in the passage.`, answer: cleanTopicName(topicRaw) }), marks: 1 },
       {
         text: partThreeText,
         marks: lastMarks,
         answer: focus,
         alternative: lastMarks >= 2
-          ? { text: `Based on the passage, state ${lastMarks >= 3 ? "three" : "two"} important points about ${topic}.`, answer: passage.join(" ") }
+          ? { text: asked ? `Based on the passage, answer in ${lastMarks >= 3 ? "three" : "two"} points: ${asked}` : `Based on the passage, state ${lastMarks >= 3 ? "three" : "two"} important points about ${topic}.`, answer: passage.join(" ") }
           : undefined,
       },
     ],
@@ -480,9 +536,12 @@ export function draftQuestionSections(
       for (let attempt = 0; attempt < topics.length; attempt += 1) {
         const topic = topics[(globalQuestionCounter + qIndex + attempt) % topics.length];
         sentence = getSourceSentence(topic, globalQuestionCounter + qIndex);
-        const caseQuestion = isCaseBasedSection(section)
-          ? generateCaseQuestion(topic, textbookText, section.marks, difficulty, globalQuestionCounter + qIndex + attempt, usedSentences)
-          : null;
+        // A case-based section looks through the other topics for a usable passage before giving up.
+        let caseQuestion: GeneratedQuestion | null = null;
+        for (let offset = 0; isCaseBasedSection(section) && !caseQuestion && offset < topics.length; offset += 1) {
+          const caseTopic = topics[(globalQuestionCounter + qIndex + attempt + offset) % topics.length];
+          caseQuestion = generateCaseQuestion(caseTopic, textbookText, section.marks, difficulty, globalQuestionCounter + qIndex + attempt, usedSentences);
+        }
         q = caseQuestion || generateSingleQuestion(
           topic,
           sentence,

@@ -31,6 +31,7 @@ import {
   type StoredBankQuestion,
 } from "./storage";
 import { joinPdfPages, cleanBrokenKerningWords } from "./text-cleaner";
+import { findTopics } from "./topic-finder";
 import "./App.css";
 
 // The PDF and Word libraries are large, so they load only when a file is read or a paper is built.
@@ -272,123 +273,6 @@ function App() {
       arrayBuffer: await file.arrayBuffer(),
     });
     return cleanBrokenKerningWords(result.value);
-  };
-
-  const findTopics = (text: string) => {
-    const lines = text
-      .split(/\r?\n/)
-      .map((line) =>
-        line
-          .replace(/\s*\.\s*/g, ".")
-          .replace(/\s+/g, " ")
-          .trim(),
-      )
-      .filter((line) => line.length >= 3);
-    const excludedLabel =
-      /^(figure|fig\.?|activity|table|question|exercise|example|page)\b/i;
-    const chapterNumbers = new Set(
-      lines.flatMap((line) => {
-        const match = line.match(/^chapter\s+(\d+)\b|^(\d+)\s+chapter\b/i);
-        return match ? [match[1] || match[2]] : [];
-      }),
-    );
-    const cleanHeading = (value: string) => {
-      let words = value.replace(/\s+/g, " ").trim().split(" ");
-      const mergedWords: string[] = [];
-      for (let index = 0; index < words.length; index += 1) {
-        const current = words[index];
-        const next = words[index + 1];
-        const pair = `${current} ${next}`.toLowerCase();
-        const repeats = words.slice(index + 2).some(
-          (_, offset) =>
-            words
-              .slice(index + 2 + offset, index + 4 + offset)
-              .join(" ")
-              .toLowerCase() === pair,
-        );
-        if (
-          next && current.length >= 3 && current.length <= 7 &&
-          next.length >= 3 && next.length <= 8 &&
-          /^[A-Z]+$/.test(current) && /^[A-Z]+$/.test(next) && repeats
-        ) {
-          mergedWords.push(`${current}${next}`);
-          index += 1;
-        } else mergedWords.push(current);
-      }
-      words = mergedWords;
-      let changed = true;
-      while (changed) {
-        changed = false;
-        for (let index = 0; index < words.length - 1; index += 1) {
-          for (
-            let blockLength = Math.min(12, Math.floor((words.length - index) / 2));
-            blockLength >= 2;
-            blockLength -= 1
-          ) {
-            const first = words.slice(index, index + blockLength).join(" ").toLowerCase();
-            const second = words.slice(index + blockLength, index + blockLength * 2).join(" ").toLowerCase();
-            if (first === second) {
-              words.splice(index + blockLength, blockLength);
-              changed = true;
-              break;
-            }
-          }
-          if (changed) break;
-        }
-      }
-      const cleanedWords: string[] = [];
-      for (const word of words) {
-        if (cleanedWords.length === 0 || word.toLowerCase() !== cleanedWords[cleanedWords.length - 1].toLowerCase())
-          cleanedWords.push(word);
-      }
-      return cleanedWords.join(" ").slice(0, 200).trim();
-    };
-    const numberedHeadings = lines.flatMap((line) => {
-      const match = line.match(/^(?:chapter\s+)?(\d+(?:\.\d+)*)(?:[.)])?\s+(.+)$/i);
-      if (
-        !match ||
-        (chapterNumbers.size > 0 && !chapterNumbers.has(match[1].split(".")[0])) ||
-        excludedLabel.test(match[2]) ||
-        excludedLabel.test(line.slice(0, match.index || 0))
-      ) return [];
-      const marker = match[1];
-      const label = cleanHeading(match[2]);
-      if (
-        !/^[A-Za-z]/.test(label) || /[.!?]$/.test(label) || label.split(" ").length > 30 ||
-        (/^(what|which|how|why|when|where|define|state|explain|describe|give|list|identify)\b/i.test(label) && /^[0-9]+[.)]/.test(line))
-      ) return [];
-      return [`${marker} ${label}`];
-    });
-    if (numberedHeadings.length > 0)
-      return [...new Map(numberedHeadings.map((heading) => [heading.split(" ")[0], heading])).values()]
-        .sort((first, second) => {
-          const firstNumbers = first.split(" ")[0].split(".").map(Number);
-          const secondNumbers = second.split(" ")[0].split(".").map(Number);
-          for (let index = 0; index < Math.max(firstNumbers.length, secondNumbers.length); index += 1) {
-            const difference = (firstNumbers[index] || 0) - (secondNumbers[index] || 0);
-            if (difference !== 0) return difference;
-          }
-          return 0;
-        })
-        .slice(0, 40);
-    const minorWords = new Set(["a", "an", "the", "of", "in", "on", "to", "and", "or", "for", "is", "are", "with"]);
-    const isTitleCase = (line: string) => line.split(" ").every(
-      (word) => minorWords.has(word.toLowerCase()) || /^[A-Z][A-Za-z'()-]*$/.test(word),
-    );
-    const fallbackHeadings: string[] = [];
-    for (const line of lines) {
-      const wordCount = line.split(" ").length;
-      if (
-        wordCount < 2 || wordCount > 12 || /[.!?,;:]$/.test(line) || /\d/.test(line) ||
-        excludedLabel.test(line) || /\b(chapter|section|unit|lesson)\b/i.test(line)
-      ) continue;
-      if (!(/[A-Z]/.test(line) && line === line.toUpperCase()) && !isTitleCase(line)) continue;
-      const heading = cleanHeading(line);
-      if (!fallbackHeadings.some((item) => item.toLowerCase() === heading.toLowerCase()))
-        fallbackHeadings.push(heading);
-      if (fallbackHeadings.length === 30) break;
-    }
-    return fallbackHeadings;
   };
 
   const analyzeTextbook = async (files: File[]) => {
