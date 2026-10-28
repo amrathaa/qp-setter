@@ -1,4 +1,13 @@
 /**
+ * A heading that wraps ("3.4.5 Extracting Metals towards the Top of the" / "Activity Series")
+ * continues on the next line when it ends on a small word or the next line closes a question.
+ */
+export const headingContinues = (label: string, next: string | undefined) =>
+  !!next && next.length <= 60 && !/^\d/.test(next) && /^[A-Z]/.test(next) && !/[.?!]$/.test(label) &&
+  (/\b(the|of|and|or|in|on|to|for|with|a|an|by|from|into|towards)$/i.test(label) ||
+    (/^(how|what|why|when|where|which|do|does|is|are|can)\b/i.test(label) && /\?$/.test(next)));
+
+/**
  * Finds a textbook's section headings ("7.2.1 Fission") to offer as topics.
  */
 export const findTopics = (text: string): string[] => {
@@ -72,13 +81,6 @@ export const findTopics = (text: string): string[] => {
     }
     return cleanedWords.join(" ").slice(0, 200).trim();
   };
-  // A heading that wraps ("3.4.5 Extracting Metals towards the Top of the" / "Activity Series")
-  // continues on the next line when it ends on a small word or the next line closes a question.
-  const continuation = (label: string, next: string | undefined) =>
-    !!next && next.length <= 60 && !/^\d/.test(next) && /^[A-Z]/.test(next) && !/[.?!]$/.test(label) &&
-    (/\b(the|of|and|or|in|on|to|for|with|a|an|by|from|into|towards)$/i.test(label) ||
-      (/^(how|what|why|when|where|which|do|does|is|are|can)\b/i.test(label) && /\?$/.test(next)));
-
   const parseHeadings = (allowUndotted: boolean) => lines.flatMap((line, index) => {
     const match = line.match(/^(?:chapter\s+)?(\d+(?:\.\d+)*)(?:[.)])?\s+(.+)$/i);
     if (
@@ -91,7 +93,7 @@ export const findTopics = (text: string): string[] => {
     ) return [];
     const marker = match[1];
     let label = cleanHeading(match[2]);
-    if (continuation(label, lines[index + 1])) label = `${label} ${lines[index + 1]}`;
+    if (headingContinues(label, lines[index + 1])) label = `${label} ${lines[index + 1]}`;
     if (
       // Headings start with a capital or a term like "pH" ("3.10 mL of a solution..." is a measurement).
       !/^([A-Z]|[a-z][A-Z])/.test(label) || /^(mL|mg|kg|cm|mm|km|kJ|mA|mV|kW|g|L|K)\b/.test(label) ||

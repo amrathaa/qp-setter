@@ -6,13 +6,13 @@ type ModelAnswerEditorProps = {
   onKeywords: (value: string[]) => void;
 };
 
-// Same rule as the answer key PDF: a word matches a keyword or a close form of it ("cell"/"cells").
-const isKeyword = (word: string, keywords: string[]) => {
-  const plain = word.toLowerCase().replace(/[^a-z0-9-]/g, "");
-  return plain.length > 1 && keywords.some((keyword) => {
-    const key = keyword.trim().toLowerCase();
-    return !!key && (plain === key || (plain.startsWith(key) && plain.length - key.length <= 2) || (key.startsWith(plain) && key.length - plain.length <= 1));
-  });
+import { keywordMask } from "./keyword-highlight";
+
+// Answer text split into alternating words and spaces, with the words the answer key will print in bold.
+const highlightedParts = (answer: string, keywords: string[]) => {
+  const parts = answer.split(/(\s+)/);
+  const mask = keywordMask(parts.filter((_, index) => index % 2 === 0), keywords);
+  return parts.map((part, index) => ({ part, marked: index % 2 === 0 && mask[index / 2] }));
 };
 
 /**
@@ -41,8 +41,8 @@ export function ModelAnswerEditor({ label, answer, keywords = [], onAnswer, onKe
       </label>
       {answer && activeKeywords.length > 0 && (
         <p className="model-answer-preview">
-          {answer.split(/(\s+)/).map((part, index) =>
-            isKeyword(part, activeKeywords) ? <mark key={index}>{part}</mark> : part,
+          {highlightedParts(answer, activeKeywords).map(({ part, marked }, index) =>
+            marked ? <mark key={index}>{part}</mark> : part,
           )}
         </p>
       )}

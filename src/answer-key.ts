@@ -2,6 +2,7 @@ import fontkit from "@pdf-lib/fontkit";
 import { PDFDocument, StandardFonts, rgb, type PDFFont, type PDFPage } from "pdf-lib";
 import type { GeneratedQuestion, GeneratedSection } from "./blueprint";
 import { toRomanNumeral } from "./text-cleaner";
+import { keywordMask } from "./keyword-highlight";
 
 export type AnswerKeyLine = { label: string; text: string; keywords?: string[] };
 
@@ -111,15 +112,7 @@ export async function createAnswerKeyPdf(
     }
   };
 
-  // A word counts as a keyword match when it is the keyword or a close form of it ("cell"/"cells").
-  const matchesKeyword = (word: string, keywords: string[]) => {
-    const plain = word.toLowerCase().replace(/[^a-z0-9-]/g, "");
-    return plain.length > 1 && keywords.some((keyword) => {
-      const key = keyword.toLowerCase();
-      return plain === key || (plain.startsWith(key) && plain.length - key.length <= 2) || (key.startsWith(plain) && key.length - plain.length <= 1);
-    });
-  };
-  // Wraps text word by word, drawing keyword matches in bold.
+  // Wraps text word by word, drawing keywords and key phrases in bold.
   const writeHighlighted = (text: string, keywords: string[], size: number, x: number, lineWidth: number) => {
     const space = regular.widthOfTextAtSize(" ", size);
     let line: Array<{ text: string; font: PDFFont }> = [];
@@ -136,8 +129,10 @@ export async function createAnswerKeyPdf(
       line = [];
       used = 0;
     };
-    for (const raw of text.split(/\s+/).filter(Boolean)) {
-      const font = matchesKeyword(raw, keywords) ? bold : regular;
+    const words = text.split(/\s+/).filter(Boolean);
+    const mask = keywordMask(words, keywords);
+    for (const [index, raw] of words.entries()) {
+      const font = mask[index] ? bold : regular;
       const word = safeText(font, raw);
       const wordWidth = font.widthOfTextAtSize(word, size);
       if (line.length && used + space + wordWidth > lineWidth) flush();
