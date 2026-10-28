@@ -29,7 +29,8 @@ const garbledEquation = (sentence: string) => {
  * Extracts clean sentences from raw textbook text for question drafting.
  */
 export function extractCleanSentences(text: string): string[] {
-  const sentences = extractTextbookSentences(text);
+  // These are quoted inside questions, so very long sentences are left to the model answers.
+  const sentences = extractTextbookSentences(text).filter((sentence) => sentence.length <= 220);
   // Prefer self-contained factual statements; fall back to everything if a chapter is too short.
   const factual = sentences.filter((sentence) => /\.$/.test(sentence) && !narrationPattern.test(sentence));
   return factual.length >= 10 ? factual : sentences;
@@ -156,7 +157,7 @@ function splitSentences(text: string): string[] {
     .filter(
       (sentence) =>
         sentence.length >= 35 &&
-        sentence.length <= 220 &&
+        sentence.length <= 320 &&
         !/^(activity|figure|fig\.?|table|question|exercise|page|chapter)\b/i.test(sentence) &&
         !/\bReprint\s+\d{4}/i.test(sentence) &&
         !garbledEquation(sentence) &&
@@ -553,14 +554,20 @@ export function textbookModelAnswer(
   if (!textbookText) return null;
   const wanted = answerLength(marks);
   const { sections } = readTextbook(textbookText);
-  const topicSentences = topicRaw ? topicSectionSentences(textbookText, topicRaw).filter(answerSentenceOk) : [];
+  const order = sections.flatMap((section) => section.sentences);
+  // A textbook without numbered sections is read as one section, finding a topic by its distinctive word.
+  const headed = sections.some((section) => section.marker);
+  const topicMention = !headed && topicRaw ? topicKeyWord(topicRaw, order) : undefined;
+  const topicSentences = (topicRaw
+    ? headed ? topicSectionSentences(textbookText, topicRaw) : topicMention ? order.filter((sentence) => sentence.toLowerCase().includes(topicMention)) : []
+    : []).filter(answerSentenceOk);
   const spread = chapterWordSpread(allSentences);
   const chapterWide = (word: string) => (spread.get(word) || 0) > Math.max(8, allSentences.length * 0.08);
   const topicWords = topicRaw ? contentWords(cleanTopicName(topicRaw)) : new Set<string>();
   const picked: string[] = [];
   if (anchor) {
     const home = sections.find((section) => section.sentences.includes(anchor));
-    if (!home?.marker) return null;
+    if (!home || (!home.marker && headed)) return null;
     // The statement's own sub-section first: the sentences after it, then those before it.
     const pool = home.sentences.filter((sentence) => sentence === anchor || answerSentenceOk(sentence));
     picked.push(anchor);
@@ -579,7 +586,6 @@ export function textbookModelAnswer(
     if (picked.length <= Math.floor(wanted / 2)) gatherRelated(topicSentences, start, picked, wanted, topicWords, () => false, [1]);
   }
   // Keep the textbook's order so the answer reads as a paragraph.
-  const order = sections.flatMap((section) => section.sentences);
   picked.sort((a, b) => order.indexOf(a) - order.indexOf(b));
   const keyWord = topicRaw ? topicKeyWord(topicRaw, picked) : undefined;
   return { answer: picked.join(" "), keywords: answerKeywordsFor(picked, marks, allSentences, keyWord) };
@@ -928,8 +934,11 @@ export function draftQuestionSections(
   const topics = selectedTopics.length > 0 ? selectedTopics : ["General Science"];
 
   const sentenceSet = new Set(sentences);
+  const allTextbookSentences = extractTextbookSentences(textbookText);
   const getSourceSentence = (topic: string, index: number): string => {
-    const keyWord = topicKeyWord(topic, sentences);
+    // The topic's distinctive word is looked for in the whole chapter ("mask", not "work"), even where
+    // it only appears in sentences too long or too narrative to quote.
+    const keyWord = topicKeyWord(topic, allTextbookSentences);
     const mentions = keyWord ? sentences.filter((s) => s.toLowerCase().includes(keyWord)) : [];
     // Statements printed under the topic's own heading come first, so the question and its answer match.
     const own = topicSectionSentences(textbookText, topic).filter((s) => sentenceSet.has(s));

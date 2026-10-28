@@ -121,14 +121,33 @@ export const findTopics = (text: string): string[] => {
   const isTitleCase = (line: string) => line.split(" ").every(
     (word) => minorWords.has(word.toLowerCase()) || /^[A-Z][A-Za-z'()-]*$/.test(word),
   );
+  // Recurring feature boxes ("Pause and Ponder", "Ready to Go Beyond") label asides, not topics.
+  const featureBox = /^(meet a scientist|pause and ponder|threads of curiosity|ready to go beyond|do you know|did you know|think and act|keep the curiosity alive|let us (?:reflect|recall)|happy exploring|more to know|be a scientist)\b/i;
+  const lineCounts = new Map<string, number>();
+  for (const line of lines) lineCounts.set(line.toLowerCase(), (lineCounts.get(line.toLowerCase()) || 0) + 1);
+  // A question printed as a heading ("Why is a kilogram used everywhere?") names the topic it answers.
+  const questionHeading = (line: string) =>
+    /^(why|how|what|which|when|where|is|are|can|do|does)\b/i.test(line) && /\?$/.test(line) && /^[A-Z]/.test(line) &&
+    line.split(" ").length >= 4 && line.split(" ").length <= 14 && (line.match(/\?/g) || []).length === 1;
   const fallbackHeadings: string[] = [];
-  for (const line of lines) {
+  for (let index = 0; index < lines.length; index += 1) {
+    let line = lines[index];
+    // A heading that wraps ("Threads of" / "Curiosity") is read as one line.
+    if (headingContinues(line, lines[index + 1])) {
+      line = `${line} ${lines[index + 1]}`;
+      index += 1;
+    }
     const wordCount = line.split(" ").length;
+    if (featureBox.test(line) || (lineCounts.get(line.toLowerCase()) || 0) > 1) continue;
     if (
-      wordCount < 2 || wordCount > 12 || /[.!?,;:]$/.test(line) || /\d/.test(line) ||
-      excludedLabel.test(line) || /\b(chapter|section|unit|lesson)\b/i.test(line)
+      !questionHeading(line) && (
+        wordCount < 2 || wordCount > 12 || /[.!?,;:]$/.test(line) || /\d/.test(line) ||
+        excludedLabel.test(line) || /\b(chapter|section|unit|lesson)\b/i.test(line) ||
+        // A line ending on a small word ("Meghnad Saha on an") is a fragment of a caption or sentence.
+        /\b(a|an|the|of|and|or|in|on|to|for|with|by|is|are)$/i.test(line) || !/^[A-Z]/.test(line) ||
+        (!(/[A-Z]/.test(line) && line === line.toUpperCase()) && !isTitleCase(line))
+      )
     ) continue;
-    if (!(/[A-Z]/.test(line) && line === line.toUpperCase()) && !isTitleCase(line)) continue;
     const heading = cleanHeading(line);
     if (!fallbackHeadings.some((item) => item.toLowerCase() === heading.toLowerCase()))
       fallbackHeadings.push(heading);
