@@ -32,7 +32,7 @@ export type BlueprintLinePart = {
 };
 
 export type BlueprintHeaderField = {
-  kind: "marks";
+  kind: "marks" | "time";
   pageIndex: number;
   text: string;
   value: number;
@@ -135,11 +135,24 @@ export type BlueprintAnalysis = {
   warnings: string[];
 };
 
+export type GeneratedQuestionPart = {
+  text: string;
+  marks: number;
+  answer?: string;
+  alternative?: { text: string; answer?: string };
+};
+
 export type GeneratedQuestion = {
   text: string;
   marks?: number;
   options?: string[];
   alternative?: string | { text: string; options?: string[] };
+  /** MCQ: the correct option's text. Written questions: the key textbook point for marking. */
+  answer?: string;
+  alternativeAnswer?: string;
+  /** Case-based questions: the passage is `text`, followed by these sub-questions. */
+  kind?: "case";
+  parts?: GeneratedQuestionPart[];
 };
 
 export type GeneratedSection = {
@@ -498,33 +511,59 @@ function isPageNumberLine(line: BlueprintLine): boolean {
   return isPageNumberText(line.text) || /\bpage\s*\d+\s*(?:of|\/)\s*\d+\b/i.test(line.text);
 }
 
-const marksFieldPattern = /(max(?:imum)?\.?\s*marks?|total\s*marks?)\s*[:=-]?\s*(\d+)/i;
+const headerFieldPatterns: Record<BlueprintHeaderField["kind"], { label: RegExp; value: RegExp }> = {
+  marks: {
+    label: /(max(?:imum)?\.?\s*marks?|total\s*marks?)\s*[:=-]?\s*/i,
+    value: /\d+/,
+  },
+  time: {
+    label: /(time(?:\s*allowed)?|duration)\s*[:=-]?\s*/i,
+    value: /(\d+(?:\.\d+)?\s*½?|½)\s*(hours?|hrs?\.?|minutes?|mins?\.?)/i,
+  },
+};
+
+// Reads "1½ hours" / "90 minutes" / "2 hrs" as minutes.
+export const parseDurationMinutes = (text: string) => {
+  const match = text.match(headerFieldPatterns.time.value);
+  if (!match) return NaN;
+  const amount = match[1].replace(/\s+/g, "");
+  const number = (Number(amount.replace("½", "")) || 0) + (amount.includes("½") ? 0.5 : 0);
+  return /^h/i.test(match[2]) ? Math.round(number * 60) : Math.round(number);
+};
 
 const findHeaderFields = (headerLines: BlueprintLine[]): BlueprintHeaderField[] => {
-  for (const line of headerLines) {
-    const parts = line.parts?.length ? line.parts : [line];
-    for (let index = 0; index < parts.length; index += 1) {
-      const part = parts[index];
-      const whole = part.text.match(marksFieldPattern);
-      const labelOnly = /(max(?:imum)?\.?\s*marks?|total\s*marks?)\s*[:=-]?\s*$/i.test(part.text);
-      const valuePart = labelOnly && /^\s*\d+\s*$/.test(parts[index + 1]?.text || "") ? parts[index + 1] : null;
-      if (!whole && !valuePart) continue;
-      const target = valuePart || part;
-      return [{
-        kind: "marks",
-        pageIndex: line.pageIndex,
-        text: target.text,
-        value: Number(valuePart ? valuePart.text.trim() : whole?.[2]),
-        x: target.x,
-        xRight: target.xRight,
-        y: line.y,
-        fontSize: target.fontSize,
-        fontName: target.fontName,
-        bold: target.bold,
-      }];
+  const fields: BlueprintHeaderField[] = [];
+  for (const kind of ["marks", "time"] as const) {
+    const { label, value } = headerFieldPatterns[kind];
+    const whole = new RegExp(`${label.source}${value.source}`, "i");
+    const labelOnly = new RegExp(`${label.source}$`, "i");
+    search: for (const line of headerLines) {
+      const parts = line.parts?.length ? line.parts : [line];
+      for (let index = 0; index < parts.length; index += 1) {
+        const part = parts[index];
+        const next = parts[index + 1];
+        // Either "Max Marks: 40" in one text item, or "Max Marks:" followed by a separate "40".
+        const valuePart = labelOnly.test(part.text) && next && new RegExp(`^\\s*${value.source}\\s*$`, "i").test(next.text) ? next : null;
+        if (!whole.test(part.text) && !valuePart) continue;
+        const target = valuePart || part;
+        const parsed = kind === "marks" ? Number(target.text.match(/(\d+)(?!.*\d)/)?.[1]) : parseDurationMinutes(target.text);
+        fields.push({
+          kind,
+          pageIndex: line.pageIndex,
+          text: target.text,
+          value: parsed,
+          x: target.x,
+          xRight: target.xRight,
+          y: line.y,
+          fontSize: target.fontSize,
+          fontName: target.fontName,
+          bold: target.bold,
+        });
+        break search;
+      }
     }
   }
-  return [];
+  return fields;
 };
 
 const pageNumberPattern = (text: string): BlueprintPageNumber["pattern"] => {

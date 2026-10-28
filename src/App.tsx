@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useRef } from "react";
-import type { BlueprintAnalysis, GeneratedSection } from "./blueprint";
+import type { BlueprintAnalysis, GeneratedQuestion, GeneratedSection } from "./blueprint";
 import {
   DEFAULT_TEMPLATE_CONFIG,
   type StandardTemplateConfig,
@@ -7,6 +7,8 @@ import {
 import {
   draftQuestionSections,
   generateSingleQuestion,
+  generateCaseQuestion,
+  isCaseBasedSection,
   extractCleanSentences,
   cleanTopicName,
 } from "./question-generator";
@@ -78,7 +80,7 @@ function App() {
 
   // Step 2: Pattern
   const [patternMode, setPatternMode] = useState<"manual" | "upload">("manual");
-  const [patternSections, setPatternSections] = useState<Array<{ count: number; marks: number; label?: string }>>([
+  const [patternSections, setPatternSections] = useState<Array<{ count: number; marks: number; label?: string; caseBased?: boolean }>>([
     { count: 10, marks: 1, label: "Section A" },
     { count: 5, marks: 2, label: "Section B" },
     { count: 4, marks: 3, label: "Section C" },
@@ -497,7 +499,7 @@ function App() {
   // Step 2 Pattern Handlers
   const updatePatternSection = (
     index: number,
-    field: "count" | "marks" | "label",
+    field: "count" | "marks" | "label" | "caseBased",
     value: any,
   ) =>
     setPatternSections((current) =>
@@ -506,7 +508,11 @@ function App() {
           ? {
               ...section,
               [field]:
-                field === "label" ? String(value) : Math.max(field === "marks" ? 1 : 0, Number(value)),
+                field === "label"
+                  ? String(value)
+                  : field === "caseBased"
+                    ? Boolean(value)
+                    : Math.max(field === "marks" ? 1 : 0, Number(value)),
             }
           : section,
       ),
@@ -619,6 +625,8 @@ function App() {
                       options: q.options.map((opt, oIdx) =>
                         oIdx === optIndex ? newOptText : opt,
                       ),
+                      // Editing the correct option's wording keeps it marked as correct.
+                      answer: q.answer === q.options[optIndex] ? newOptText : q.answer,
                     }
                   : q,
               ),
@@ -648,14 +656,57 @@ function App() {
     );
   };
 
+  // Applies an edit to one drafted question.
+  const patchQuestion = (
+    sectionIndex: number,
+    questionIndex: number,
+    patch: (question: GeneratedQuestion) => GeneratedQuestion,
+  ) => {
+    setDraftEdited(true);
+    setDraftedSections((prev) =>
+      prev.map((s, sIdx) =>
+        sIdx === sectionIndex
+          ? { ...s, questions: s.questions.map((q, qIdx) => (qIdx === questionIndex ? patch(q) : q)) }
+          : s,
+      ),
+    );
+  };
+
+  const updateQuestionAnswer = (sectionIndex: number, questionIndex: number, answer: string) =>
+    patchQuestion(sectionIndex, questionIndex, (q) => ({ ...q, answer }));
+
+  const updateQuestionPart = (
+    sectionIndex: number,
+    questionIndex: number,
+    partIndex: number,
+    field: "text" | "answer" | "alternative",
+    value: string,
+  ) =>
+    patchQuestion(sectionIndex, questionIndex, (q) => ({
+      ...q,
+      parts: q.parts?.map((part, pIdx) =>
+        pIdx !== partIndex
+          ? part
+          : field === "alternative"
+            ? { ...part, alternative: { ...part.alternative, text: value } }
+            : { ...part, [field]: value },
+      ),
+    }));
+
+  // Each regenerate picks a different passage for case-based questions.
+  const regenerateCount = useRef(0);
   const regenerateQuestion = (sectionIndex: number, questionIndex: number) => {
     const sentences = extractCleanSentences(textbookText);
     const topics = selectedTopics.length > 0 ? selectedTopics : ["General Concept"];
     const topic = topics[(sectionIndex + questionIndex + 1) % topics.length];
     const sentence = pickRandomItem(sentences, topic);
-    const marks = draftedSections[sectionIndex]?.questions[questionIndex]?.marks || 1;
+    const current = draftedSections[sectionIndex]?.questions[questionIndex];
+    const marks = current?.marks || 1;
 
-    const fresh = generateSingleQuestion(
+    const freshCase = current?.kind === "case"
+      ? generateCaseQuestion(pickRandomItem(topics, topic), textbookText, marks, difficulty, (regenerateCount.current += 1) * 7 + questionIndex)
+      : null;
+    const fresh = freshCase || generateSingleQuestion(
       topic,
       sentence,
       marks,
@@ -709,13 +760,27 @@ function App() {
     );
   };
 
-  const downloadPdf = (blob: Blob) => {
+  const downloadPdf = (blob: Blob, fileName = "qp-setter-blueprint.pdf") => {
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
     anchor.href = url;
-    anchor.download = "qp-setter-blueprint.pdf";
+    anchor.download = fileName;
     anchor.click();
     window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+
+  const paperTitle = () =>
+    designMode === "blueprint" && blueprintFile ? blueprintFile.name.replace(/\.pdf$/i, "") : standardConfig.examTitle;
+
+  // A separate teacher's copy, so the question paper itself never carries the answers.
+  const downloadAnswerKey = async () => {
+    try {
+      const { createAnswerKeyPdf } = await import("./answer-key");
+      const bytes = await createAnswerKeyPdf(draftedSections, paperTitle(), draftedTotalMarks);
+      downloadPdf(new Blob([new Uint8Array(bytes).buffer], { type: "application/pdf" }), "qp-setter-answer-key.pdf");
+    } catch {
+      setWarnings((current) => [...current, "The answer key could not be created. Please try again."]);
+    }
   };
 
   const generatePdf = async () => {
@@ -743,6 +808,7 @@ function App() {
         layout,
         draftedSections,
         new URLSearchParams(window.location.search).get("debug") === "1",
+        { durationMinutes: duration },
       );
 
       setWarnings(result.warnings);
@@ -758,7 +824,7 @@ function App() {
       const paperRecord: StoredPaper = {
         id: paperId,
         createdAt: new Date().toISOString(),
-        title: designMode === "blueprint" && blueprintFile ? blueprintFile.name.replace(/\.pdf$/i, "") : standardConfig.examTitle,
+        title: paperTitle(),
         subject: standardConfig.subjectName,
         className: standardConfig.className,
         totalMarks: draftedTotalMarks,
@@ -1389,6 +1455,14 @@ function App() {
                               }
                             />
                             <span>marks</span>
+                            <label className="case-toggle" title="Passage with (i), (ii), (iii) sub-questions, as in CBSE Section E">
+                              <input
+                                type="checkbox"
+                                checked={isCaseBasedSection(section)}
+                                onChange={(event) => updatePatternSection(index, "caseBased", event.target.checked)}
+                              />
+                              Case-based
+                            </label>
                             {patternSections.length > 1 && (
                               <button
                                 type="button"
@@ -1728,6 +1802,50 @@ function App() {
                                     </div>
                                   )}
 
+                                  {q.options && q.options.length > 0 && (
+                                    <label className="answer-wrap">
+                                      <strong>Correct answer:</strong>
+                                      <select
+                                        value={q.options.findIndex((opt) => opt === q.answer)}
+                                        onChange={(e) => updateQuestionAnswer(sIdx, qIdx, q.options?.[Number(e.target.value)] || "")}
+                                      >
+                                        <option value={-1} disabled>Choose the correct option</option>
+                                        {q.options.map((opt, oIdx) => (
+                                          <option key={oIdx} value={oIdx}>
+                                            {String.fromCharCode(97 + oIdx)}) {opt}
+                                          </option>
+                                        ))}
+                                      </select>
+                                    </label>
+                                  )}
+
+                                  {q.parts?.map((part, pIdx) => (
+                                    <div key={pIdx} className="case-part">
+                                      <strong>({["i", "ii", "iii", "iv", "v"][pIdx] || pIdx + 1}) · {part.marks} mark{part.marks > 1 ? "s" : ""}</strong>
+                                      <textarea
+                                        value={part.text}
+                                        onChange={(e) => updateQuestionPart(sIdx, qIdx, pIdx, "text", e.target.value)}
+                                      />
+                                      {part.alternative && (
+                                        <>
+                                          <strong>OR</strong>
+                                          <textarea
+                                            value={part.alternative.text}
+                                            onChange={(e) => updateQuestionPart(sIdx, qIdx, pIdx, "alternative", e.target.value)}
+                                          />
+                                        </>
+                                      )}
+                                      <label className="answer-wrap">
+                                        <strong>Answer key:</strong>
+                                        <input
+                                          type="text"
+                                          value={part.answer || ""}
+                                          onChange={(e) => updateQuestionPart(sIdx, qIdx, pIdx, "answer", e.target.value)}
+                                        />
+                                      </label>
+                                    </div>
+                                  ))}
+
                                   {q.alternative && (
                                     <div className="alternative-wrap">
                                       <strong>OR Alternative Choice:</strong>
@@ -1738,6 +1856,18 @@ function App() {
                                         }
                                       />
                                     </div>
+                                  )}
+
+                                  {!q.options?.length && !q.parts?.length && (
+                                    <label className="answer-wrap">
+                                      <strong>Key point for marking:</strong>
+                                      <input
+                                        type="text"
+                                        value={q.answer || ""}
+                                        placeholder="What a full-marks answer must mention"
+                                        onChange={(e) => updateQuestionAnswer(sIdx, qIdx, e.target.value)}
+                                      />
+                                    </label>
                                   )}
                                 </div>
                               ))}
@@ -1791,6 +1921,9 @@ function App() {
                               onClick={() => generatedPdf && downloadPdf(generatedPdf)}
                             >
                               Download PDF
+                            </button>
+                            <button className="next-button" onClick={() => void downloadAnswerKey()}>
+                              Download answer key
                             </button>
                           </div>
                         </div>

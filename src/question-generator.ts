@@ -5,8 +5,12 @@ export interface QuestionGeneratorOptions {
   textbookText: string;
   selectedTopics: string[];
   difficulty: "Easy" | "Moderate" | "Advanced" | "Application" | string;
-  patternSections: Array<{ count: number; marks: number; label?: string }>;
+  patternSections: Array<{ count: number; marks: number; label?: string; caseBased?: boolean }>;
 }
+
+/** CBSE's source/case-based items carry 4 marks, so 4-mark sections default to case-based. */
+export const isCaseBasedSection = (section: { marks: number; caseBased?: boolean }) =>
+  section.caseBased ?? section.marks === 4;
 
 // Sentences that only make sense inside the textbook's own narration ("Let us...", "Can you think...").
 const narrationPattern = /\([a-d]\)|^(it|this|these|that|those|they|he|she|we|let|can|think|but|and|or|so|now|here|on the other hand|however|such|therefore|thus|hence|similarly|also|compare|observe|take|find|look|draw|discuss|try|note|see|place|collect|consider|imagine)\b|\bto think of\b|\b(we|us|our|you|your|let's)\b|\b(classroom|next chapter|previous chapter|class\s+(?:ix|viii|x)|activity|figure|fig\.)/i;
@@ -15,7 +19,17 @@ const narrationPattern = /\([a-d]\)|^(it|this|these|that|those|they|he|she|we|le
  * Extracts clean sentences from raw textbook text for question drafting.
  */
 export function extractCleanSentences(text: string): string[] {
-  const sentences = text
+  const sentences = extractTextbookSentences(text);
+  // Prefer self-contained factual statements; fall back to everything if a chapter is too short.
+  const factual = sentences.filter((sentence) => /\.$/.test(sentence) && !narrationPattern.test(sentence));
+  return factual.length >= 10 ? factual : sentences;
+}
+
+/**
+ * All readable sentences in textbook order (used to cut out case-study passages).
+ */
+function extractTextbookSentences(text: string): string[] {
+  return text
     .replace(/([A-Za-z])-\s+([a-z])/g, "$1-$2")
     .split(/(?<=[.!?])\s+/)
     .map((sentence) => cleanBrokenKerningWords(sentence.replace(/\s+/g, " ").trim()))
@@ -28,9 +42,6 @@ export function extractCleanSentences(text: string): string[] {
         /^[A-Z]/.test(sentence) &&
         /[a-zA-Z]{3,}/.test(sentence),
     );
-  // Prefer self-contained factual statements; fall back to everything if a chapter is too short.
-  const factual = sentences.filter((sentence) => /\.$/.test(sentence) && !narrationPattern.test(sentence));
-  return factual.length >= 10 ? factual : sentences;
 }
 
 const minorTitleWords = new Set(["a", "an", "the", "of", "in", "on", "to", "and", "or", "for", "by", "with", "at"]);
@@ -49,6 +60,10 @@ export function cleanTopicName(topic: string): string {
     .replace(/\bDna\b/g, "DNA");
 }
 
+// Topics are dropped mid-sentence ("Explain the importance of variation"), so a leading article is lower-cased.
+const topicForSentence = (topicRaw: string) =>
+  (cleanTopicName(topicRaw) || "the key concept").replace(/^(The|A|An)\s/, (article) => article.toLowerCase());
+
 const commonWords = new Set(`about above after again against almost along already also although always among another answer anything around because become becomes been before being below between beyond both called cannot cases certain change changes common could different does doing done during each early either enough especially even every example fact first following form found from further given great happen happens having however important instance into itself known large larger later least less level like likely little made main make makes making many might more most much must namely nature necessary need needs never number often only other others otherwise over part particular parts place possible present process processes produce produced rather really reason result same seen several shall should show shown similar simple since single small some something sometimes specific still such take taken than that their them themselves then there therefore these they thing things think this those though three through thus time together turn under until upon used useful using usually various very what when where whether which while whole whose will with within without would years`.split(/\s+/));
 
 type KeyTerm = { term: string; proper: boolean; score: number };
@@ -59,6 +74,13 @@ function keyTermVocabulary(sentences: string[]): Map<string, KeyTerm> {
   const cached = vocabularyCache.get(sentences);
   if (cached) return cached;
   const counts = new Map<string, { count: number; properCount: number; surface: string }>();
+  const allWords = new Set(sentences.flatMap((sentence) => (sentence.toLowerCase().match(/[a-z]+/g) || [])));
+  // "develops"/"grows" are verbs when the chapter also uses "developed"/"growing".
+  const looksLikeVerb = (key: string) => {
+    if (!/[^s]s$/.test(key)) return false;
+    const base = key.slice(0, -1);
+    return [`${base}ed`, `${base}ing`, `${base.replace(/e$/, "")}ing`, `${base}d`].some((form) => allWords.has(form));
+  };
   for (const sentence of sentences) {
     const words = sentence.match(/[A-Za-z][A-Za-z-]*[A-Za-z]/g) || [];
     words.forEach((word, index) => {
@@ -75,11 +97,12 @@ function keyTermVocabulary(sentences: string[]): Map<string, KeyTerm> {
   }
   const vocabulary = new Map<string, KeyTerm>();
   for (const [key, entry] of counts) {
-    const proper = entry.properCount > 0 && entry.properCount >= entry.count / 2;
+    // Proper names are single capitalised words (Hydra, Plasmodium), not "DNA-copying".
+    const proper = entry.properCount > 0 && entry.properCount >= entry.count / 2 && /^[A-Z][a-z]+$/.test(entry.surface);
     // Technical terms recur a few times; very frequent words are usually generic.
     if (entry.count > 25 || (!proper && entry.count < 2)) continue;
     // Blanks and options should be nouns; skip adverb/verb/adjective-looking words.
-    if (!proper && /(?:ly|ed|ing|ive|ous|ful|able|ible|ent|ant|ise|ize|ate|al|ic|ar|ian|ens)$/.test(key)) continue;
+    if (!proper && (/(?:ly|ed|ing|ive|ous|ful|able|ible|ent|ant|ise|ize|ate|al|ic|ar|ian|ens)$/.test(key) || looksLikeVerb(key))) continue;
     const score = (proper ? 3 : 0) + (key.length >= 8 ? 1 : 0) +
       (/(?:tion|sis|ism|ule|ome|cell|gen|ploid|ium|cyte|phyll|ospore)s?$/.test(key) ? 1.5 : 0) +
       Math.min(entry.count, 6) * 0.2 - (entry.count > 12 ? 1.5 : 0);
@@ -108,18 +131,24 @@ function buildClozeMcq(sentence: string, allSentences: string[], seed: number) {
 
   const sentenceWords = new Set(words.map((word) => word.toLowerCase()));
   const isPlural = (word: string) => /[^s]s$/.test(word.toLowerCase());
+  // "cells" and "germ-cells" could both fit the blank, so terms containing one another are not offered together.
+  const overlaps = (a: string, b: string) => {
+    const [x, y] = [a.toLowerCase(), b.toLowerCase()];
+    return x.includes(y) || y.includes(x);
+  };
   const pool = [...vocabulary.values()]
     .filter((entry) =>
       entry.proper === answer.proper &&
       (entry.proper || isPlural(entry.term) === isPlural(answer.term)) &&
       !sentenceWords.has(entry.term.toLowerCase()) &&
       stemOf(entry.term) !== stemOf(answer.term) &&
+      !overlaps(entry.term, answer.term) &&
       entry.score >= 1)
     .sort((a, b) => b.score - a.score || a.term.localeCompare(b.term));
   const distractors: string[] = [];
   for (let offset = 0; offset < pool.length && distractors.length < 3; offset += 1) {
     const candidate = pool[(seed * 5 + offset) % pool.length].term;
-    if (!distractors.some((term) => stemOf(term) === stemOf(candidate))) distractors.push(candidate);
+    if (!distractors.some((term) => stemOf(term) === stemOf(candidate) || overlaps(term, candidate))) distractors.push(candidate);
   }
   if (distractors.length < 3) return null;
 
@@ -129,11 +158,12 @@ function buildClozeMcq(sentence: string, allSentences: string[], seed: number) {
   const display = (term: string) => (blankAtStart ? term.charAt(0).toUpperCase() + term.slice(1) : term);
   const options = [answer.term, ...distractors].map(display);
   const shift = seed % 4;
-  return { stem, options: [...options.slice(shift), ...options.slice(0, shift)] };
+  return { stem, answer: display(answer.term), options: [...options.slice(shift), ...options.slice(0, shift)] };
 }
 
 /**
  * Generates an individual question given a topic, sentence, marks, and difficulty.
+ * Written questions carry the textbook sentence they were built from as their marking point.
  */
 export function generateSingleQuestion(
   topicRaw: string,
@@ -144,7 +174,22 @@ export function generateSingleQuestion(
   allSentences: string[],
   usedSentences: Set<string> = new Set(),
 ): GeneratedQuestion {
-  const topic = cleanTopicName(topicRaw) || "the key concept";
+  const question = draftQuestion(topicRaw, sourceSentenceRaw, marks, difficulty, questionIndex, allSentences, usedSentences);
+  if (question.answer || question.options) return question;
+  const source = sourceSentenceRaw.trim();
+  return source ? { ...question, answer: source } : question;
+}
+
+function draftQuestion(
+  topicRaw: string,
+  sourceSentenceRaw: string,
+  marks: number,
+  difficulty: string,
+  questionIndex: number,
+  allSentences: string[],
+  usedSentences: Set<string> = new Set(),
+): GeneratedQuestion {
+  const topic = topicForSentence(topicRaw);
   const sentence = sourceSentenceRaw
     .replace(/\b(chapter|section|unit|lesson)\s+\d+(?:\.\d+)*/gi, "the lesson")
     .replace(/\b\d+(?:\.\d+)+\b/g, "")
@@ -172,13 +217,14 @@ export function generateSingleQuestion(
           : difficulty === "Application"
             ? "Which term best completes the following observation?"
             : "Choose the correct option to complete the statement:";
-      return { text: `${lead} ${mcq.stem}`, marks: 1, options: mcq.options };
+      return { text: `${lead} ${mcq.stem}`, marks: 1, options: mcq.options, answer: mcq.answer };
     }
     // Too little textbook text to build options from: fall back to a true/false style choice.
     return {
       text: `State whether the following statement about ${topic} is true or false: ${sentence.replace(/[.]$/, "")}.`,
       marks: 1,
       options: ["True", "False", "Partly true", "Cannot be determined"],
+      answer: "True",
     };
   }
 
@@ -262,6 +308,136 @@ export function generateSingleQuestion(
     text: mainText,
     marks,
     alternative: altText,
+    alternativeAnswer: altSentence || undefined,
+  };
+}
+
+/**
+ * The topic's most distinctive word ("spore" in "Spore Formation", "human" in "Reproduction in
+ * Human Beings"), so matching does not hinge on a common word like "formation" or "reproduction".
+ */
+function topicKeyWord(topic: string, sentences: string[]): string | undefined {
+  const lowerSentences = sentences.map((s) => s.toLowerCase());
+  return cleanTopicName(topic)
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((w) => w.length > 3)
+    .map((word) => ({ word, count: lowerSentences.filter((s) => s.includes(word)).length }))
+    .filter((entry) => entry.count > 0)
+    .sort((a, b) => a.count - b.count)[0]?.word;
+}
+
+// Passage sentences must be complete statements: no activity steps, figure references or cut-off brackets.
+const passageSentenceOk = (sentence: string) =>
+  /\.$/.test(sentence) &&
+  !/\([a-d]\)|\b(activity|figure|fig\.?|exercise)\b|\(fig/i.test(sentence) &&
+  !/^(place|note|take|observe|look|find|try|draw|discuss|let|keep|cut|put|add|remove|collect|compare)\b/i.test(sentence) &&
+  !/\b(you|your|we|us|let's)\b/i.test(sentence) &&
+  (sentence.match(/\(/g) || []).length === (sentence.match(/\)/g) || []).length;
+
+/**
+ * Builds a CBSE-style source/case-based question: a textbook passage followed by
+ * (i) 1 mark, (ii) 1 mark and (iii) the remaining marks with an internal OR choice.
+ * Returns null when the chapter has no suitable passage for the topic.
+ */
+export function generateCaseQuestion(
+  topicRaw: string,
+  textbookText: string,
+  marks: number,
+  difficulty: string,
+  seed: number,
+  usedSentences: Set<string> = new Set(),
+): GeneratedQuestion | null {
+  if (marks < 3) return null;
+  const topic = topicForSentence(topicRaw);
+  const ordered = extractTextbookSentences(textbookText);
+  const allSentences = extractCleanSentences(textbookText);
+  const keyWord = topicKeyWord(topicRaw, ordered);
+
+  // Runs of 3-4 consecutive textbook sentences that open with the topic and read as one paragraph.
+  const windows: string[][] = [];
+  for (let start = 0; start < ordered.length; start += 1) {
+    if (keyWord && !ordered[start].toLowerCase().includes(keyWord)) continue;
+    for (const size of [4, 3]) {
+      const run = ordered.slice(start, start + size);
+      const length = run.join(" ").length;
+      if (run.length === size && run.every(passageSentenceOk) && length >= 220 && length <= 760) {
+        windows.push(run);
+        break;
+      }
+    }
+  }
+  // Prefer a passage no other question has quoted; reuse one only if the chapter has nothing else.
+  const fresh = windows.filter((run) => !run.some((sentence) => usedSentences.has(sentence)));
+  const choices = fresh.length ? fresh : windows;
+  if (!choices.length) return null;
+  const passage = choices[seed % choices.length];
+
+  // Sub-questions prefer sentences no other question has used, even when the passage overlaps.
+  const byFreshness = [...passage].sort((a, b) => Number(usedSentences.has(a)) - Number(usedSentences.has(b)));
+
+  // (i) a fill-in-the-blank from the passage
+  let partOne: { text: string; answer: string } | null = null;
+  let partOneSentence = "";
+  for (const sentence of byFreshness) {
+    const cloze = buildClozeMcq(sentence, allSentences, seed);
+    if (cloze) {
+      partOne = { text: `Fill in the blank: ${cloze.stem}`, answer: cloze.answer };
+      partOneSentence = sentence;
+      break;
+    }
+  }
+  // (ii) the meaning of a technical term from the passage, or a second blank if it has none
+  const vocabulary = keyTermVocabulary(allSentences);
+  const term = passage
+    .flatMap((sentence) => (sentence.match(/[A-Za-z][A-Za-z-]*[A-Za-z]/g) || []).map((word) => ({ sentence, info: vocabulary.get(word.toLowerCase()) })))
+    .filter((entry) =>
+      entry.info && !entry.info.proper && entry.info.score >= 2.5 &&
+      entry.info.term.toLowerCase() !== partOne?.answer.toLowerCase() &&
+      // A word used all over the chapter ("organisms") is too general to define.
+      allSentences.filter((sentence) => sentence.toLowerCase().includes(entry.info!.term.toLowerCase())).length <= 6)
+    .sort((a, b) => (b.info?.score || 0) - (a.info?.score || 0))[0];
+  let partTwo: { text: string; answer: string } | null = term?.info
+    ? { text: `What is meant by "${term.info.term}"?`, answer: term.sentence }
+    : null;
+  let partTwoSentence = term?.sentence || "";
+  for (const sentence of byFreshness) {
+    if (partTwo) break;
+    if (sentence === partOneSentence) continue;
+    const cloze = buildClozeMcq(sentence, allSentences, seed + 1);
+    if (cloze && cloze.answer.toLowerCase() !== partOne?.answer.toLowerCase()) {
+      partTwo = { text: `Fill in the blank: ${cloze.stem}`, answer: cloze.answer };
+      partTwoSentence = sentence;
+    }
+  }
+  // (iii) the longer part, built on the fullest sentence the first two parts did not use
+  const remaining = passage.filter((sentence) => sentence !== partOneSentence && sentence !== partTwoSentence);
+  const focus = [...remaining].sort((a, b) => Number(usedSentences.has(a)) - Number(usedSentences.has(b)) || b.length - a.length)[0] || passage[passage.length - 1];
+  const focusQuote = `"${focus.replace(/\.$/, "")}."`;
+  const lastMarks = marks - 2;
+  const partThreeText = difficulty === "Application"
+    ? `Give one real-life example of the idea in the statement ${focusQuote} and explain it.`
+    : difficulty === "Advanced"
+      ? `Explain the statement ${focusQuote} What would happen if it were not true?`
+      : `Explain the following statement from the passage: ${focusQuote}`;
+
+  passage.forEach((sentence) => usedSentences.add(sentence));
+  return {
+    kind: "case",
+    text: `Read the passage given below and answer the questions that follow.\n${passage.join(" ")}`,
+    marks,
+    parts: [
+      { ...(partOne || { text: `State one fact about ${topic} given in the passage.`, answer: passage[0] }), marks: 1 },
+      { ...(partTwo || { text: `Name the process described in the passage.`, answer: cleanTopicName(topicRaw) }), marks: 1 },
+      {
+        text: partThreeText,
+        marks: lastMarks,
+        answer: focus,
+        alternative: lastMarks >= 2
+          ? { text: `Based on the passage, state ${lastMarks >= 3 ? "three" : "two"} important points about ${topic}.`, answer: passage.join(" ") }
+          : undefined,
+      },
+    ],
   };
 }
 
@@ -276,20 +452,8 @@ export function draftQuestionSections(
   const topics = selectedTopics.length > 0 ? selectedTopics : ["General Science"];
 
   const getSourceSentence = (topic: string, index: number): string => {
-    const topicWords = cleanTopicName(topic)
-      .toLowerCase()
-      .split(/\s+/)
-      .filter((w) => w.length > 3);
-
-    // Match on the topic's most distinctive word ("spore" in "Spore Formation", "human" in
-    // "Reproduction in Human Beings"), not on a common word like "formation" or "reproduction".
-    const lowerSentences = sentences.map((s) => s.toLowerCase());
-    const byRarity = topicWords
-      .map((word) => ({ word, count: lowerSentences.filter((s) => s.includes(word)).length }))
-      .filter((entry) => entry.count > 0)
-      .sort((a, b) => a.count - b.count);
-    const keyWord = byRarity[0]?.word;
-    const matches = keyWord ? sentences.filter((_, i) => lowerSentences[i].includes(keyWord)) : [];
+    const keyWord = topicKeyWord(topic, sentences);
+    const matches = keyWord ? sentences.filter((s) => s.toLowerCase().includes(keyWord)) : [];
 
     // Take the next sentence about this topic not already used in the paper. If there is none, return ""
     // so the question asks about the topic directly instead of quoting an unrelated sentence.
@@ -316,7 +480,10 @@ export function draftQuestionSections(
       for (let attempt = 0; attempt < topics.length; attempt += 1) {
         const topic = topics[(globalQuestionCounter + qIndex + attempt) % topics.length];
         sentence = getSourceSentence(topic, globalQuestionCounter + qIndex);
-        q = generateSingleQuestion(
+        const caseQuestion = isCaseBasedSection(section)
+          ? generateCaseQuestion(topic, textbookText, section.marks, difficulty, globalQuestionCounter + qIndex + attempt, usedSentences)
+          : null;
+        q = caseQuestion || generateSingleQuestion(
           topic,
           sentence,
           section.marks,

@@ -1,4 +1,4 @@
-import type { GeneratedSection } from "./blueprint";
+import type { GeneratedQuestion, GeneratedSection } from "./blueprint";
 
 export interface StoredPaper {
   id: string;
@@ -24,6 +24,8 @@ export interface StoredBankQuestion {
   difficulty?: string;
   options?: string[];
   alternative?: string;
+  answer?: string;
+  parts?: GeneratedQuestion["parts"];
   dateAdded: string;
   paperTitle?: string;
 }
@@ -222,6 +224,8 @@ export function saveQuestionsToBank(
             difficulty,
             options: q.options,
             alternative: typeof q.alternative === "string" ? q.alternative : q.alternative?.text,
+            answer: q.answer,
+            parts: q.parts,
             dateAdded: new Date().toLocaleDateString(),
             paperTitle,
           });

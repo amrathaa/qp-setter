@@ -7,6 +7,7 @@ import {
   type PDFPage,
 } from "pdf-lib";
 import { mapPaperFont } from "./blueprint";
+import { stripPageText } from "./content-strip";
 import type {
   BlueprintAnalysis,
   BlueprintFillResult,
@@ -84,8 +85,8 @@ const embedPaperFonts = async (
       boldResponse.arrayBuffer(),
     ]);
     const glyphFont = fontkit.create(new Uint8Array(regularBytes)) as unknown as { hasGlyphForCodePoint: (codePoint: number) => boolean };
-    const regular = await document.embedFont(new Uint8Array(regularBytes), { subset: false });
-    const bold = await document.embedFont(new Uint8Array(boldBytes), { subset: false });
+    const regular = await document.embedFont(new Uint8Array(regularBytes), { subset: true });
+    const bold = await document.embedFont(new Uint8Array(boldBytes), { subset: true });
     try {
       (regular as unknown as { embedder: { fontFeatures?: Record<string, boolean> } }).embedder.fontFeatures = {
         liga: false,
@@ -250,8 +251,15 @@ const makeQuestionLines = (
   const regular = fonts.regular;
   const prefix = sanitizeText(`${getNumberPrefix(analysis.pageStyles[0].numberingStyle, number)} `, regular, warnings, fonts.hasGlyph);
   const prefixWidth = regular.widthOfTextAtSize(prefix, size) + size * 0.45;
-  const stem = sanitizeText(cleanBrokenKerningWords(cleanQuestionText(question.text)), regular, warnings, fonts.hasGlyph);
-  const stemLines = wrapText(stem, regular, size, Math.max(24, width - prefixWidth));
+  // A case-based question's instruction and passage are separate paragraphs.
+  const stemLines = cleanQuestionText(question.text)
+    .split(/\n+/)
+    .flatMap((paragraph) => wrapText(
+      sanitizeText(cleanBrokenKerningWords(paragraph), regular, warnings, fonts.hasGlyph),
+      regular,
+      size,
+      Math.max(24, width - prefixWidth),
+    ));
   stemLines.forEach((line, index) => {
     const segments: PlannedSegment[] = [];
     if (index === 0) segments.push({ text: prefix, xOffset: 0, bold: false });
@@ -294,6 +302,28 @@ const makeQuestionLines = (
     }
   };
   appendOptions(question.options || []);
+  // Case-based sub-questions: (i), (ii), (iii) under the passage, each with its own marks.
+  const partLabelWidth = size * 2.2;
+  const appendPart = (label: string, text: string, marks?: number) => {
+    // Leave room on the right for the "(2)" marks label.
+    const marksRoom = marks === undefined ? 0 : regular.widthOfTextAtSize(`(${marks})`, size) + size;
+    const lines = wrapText(sanitizeText(cleanBrokenKerningWords(text), regular, warnings, fonts.hasGlyph), regular, size, Math.max(24, width - prefixWidth - partLabelWidth - marksRoom));
+    lines.forEach((line, lineIndex) => {
+      const segments: PlannedSegment[] = [];
+      if (lineIndex === 0) segments.push({ text: label, xOffset: prefixWidth, bold: false });
+      segments.push({ text: line, xOffset: prefixWidth + partLabelWidth, bold: false });
+      if (lineIndex === 0 && marks !== undefined) segments.push({ text: `(${marks})`, xOffset: width, bold: false, align: "right" });
+      output.push({ segments, fontSize: size, section });
+    });
+  };
+  (question.parts || []).forEach((part, partIndex) => {
+    const label = `(${toRomanNumeral(partIndex + 1)})`;
+    appendPart(label, part.text, part.marks);
+    if (part.alternative) {
+      output.push({ segments: [{ text: "OR", xOffset: 0, bold: true, align: "center" }], fontSize: size, section });
+      appendPart(label, part.alternative.text, part.marks);
+    }
+  });
   const rawAlt = typeof question.alternative === "string" ? question.alternative : question.alternative?.text;
   const alternativeText = rawAlt ? cleanBrokenKerningWords(rawAlt) : undefined;
   const alternativeOptions = typeof question.alternative === "string" ? [] : question.alternative?.options || [];
@@ -536,7 +566,10 @@ const reflowPlans = (
   return plans;
 };
 
-const coverOldBody = (page: PDFPage, analysis: BlueprintAnalysis, outputPageIndex: number) => {
+type Box = { x: number; y: number; width: number; height: number };
+
+// The parts of a blueprint page whose old content is replaced: the body band, each detected body line, and the page number.
+const coverRegions = (analysis: BlueprintAnalysis, outputPageIndex: number) => {
   const sourcePageIndex = Math.min(outputPageIndex, analysis.pageStyles.length - 1);
   const style = analysis.pageStyles[sourcePageIndex];
   const page0Cutoff = analysis.generalInstructionsY ? analysis.generalInstructionsY + 18 : analysis.headerBottomY + 4;
@@ -546,54 +579,68 @@ const coverOldBody = (page: PDFPage, analysis: BlueprintAnalysis, outputPageInde
   const footerTexts = sourceLines.filter((line) => analysis.footerLines.has(line) || analysis.pageNumberLines.has(line));
   const headerTexts = sourceLines.filter((line) => analysis.runningHeaderLines?.has(line));
 
-  // 1. Wipe the entire body content area with a solid white rectangle when page background is standard white
-  if (!analysis.hasColoredBackground) {
-    // Stop just above the running footer's glyphs and just below the running header's descenders.
-    const topLimit = outputPageIndex === 0
-      ? page0Cutoff
-      : headerTexts.length
-        ? Math.min(...headerTexts.map((line) => line.y - line.fontSize * 0.3)) - 1
-        : (style.headerBottom > 0 ? style.headerBottom : style.pageHeight - 20);
-    const bottomLimit = footerTexts.length
-      ? Math.max(...footerTexts.map((line) => line.y + line.fontSize)) + 1
-      : style.footerTop > 0 ? style.footerTop : 20;
+  // Stop just above the running footer's glyphs and just below the running header's descenders.
+  const topLimit = outputPageIndex === 0
+    ? page0Cutoff
+    : headerTexts.length
+      ? Math.min(...headerTexts.map((line) => line.y - line.fontSize * 0.3)) - 1
+      : (style.headerBottom > 0 ? style.headerBottom : style.pageHeight - 20);
+  const bottomLimit = footerTexts.length
+    ? Math.max(...footerTexts.map((line) => line.y + line.fontSize)) + 1
+    : style.footerTop > 0 ? style.footerTop : 20;
+  const band: Box | null = !analysis.hasColoredBackground && topLimit > bottomLimit
+    ? { x: 0, y: bottomLimit, width: style.pageWidth, height: topLimit - bottomLimit }
+    : null;
 
-    if (topLimit > bottomLimit) {
-      page.drawRectangle({
-        x: 0,
-        y: bottomLimit,
-        width: style.pageWidth,
-        height: topLimit - bottomLimit,
-        color: rgb(1, 1, 1),
-        borderWidth: 0,
-      });
-    }
-  }
+  // Page numbers are masked on their own, so footer text sharing their line survives.
+  const lines = sourceLines
+    .filter((line) => !analysis.pageNumberLines.has(line) && !isKeptRunningLine(line))
+    .filter((line) => sourcePageIndex !== 0 || line.y + line.fontSize * 0.8 < page0Cutoff)
+    .map((line) => {
+      const x = Math.max(0, line.x - 4);
+      const y = Math.max(0, line.y - 4);
+      return {
+        x,
+        y,
+        width: Math.min(style.pageWidth - x, Math.max(2, line.xRight - line.x) + 8),
+        height: Math.min(style.pageHeight - y, Math.max(line.fontSize, 4) + 8),
+      };
+    });
 
-  // 2. Line-specific masking for precision coverage of detected body lines and descenders
-  for (const line of sourceLines) {
-    // Page numbers are masked precisely in step 3, so footer text sharing their line survives.
-    if (analysis.pageNumberLines.has(line) || isKeptRunningLine(line)) continue;
-    const shouldCover = sourcePageIndex === 0
-      ? line.y + line.fontSize * 0.8 < page0Cutoff
-      : true;
-    if (!shouldCover) continue;
-    const x = Math.max(0, line.x - 4);
-    const y = Math.max(0, line.y - 4);
-    const width = Math.min(style.pageWidth - x, Math.max(2, line.xRight - line.x) + 8);
-    const height = Math.min(style.pageHeight - y, Math.max(line.fontSize, 4) + 8);
-    page.drawRectangle({ x, y, width, height, color: rgb(1, 1, 1), borderWidth: 0 });
-  }
-
-  // 3. Explicitly mask the blueprint's original page number location
   const pageTemplate = analysis.pageNumbers[sourcePageIndex] || analysis.pageNumbers[0];
+  let pageNumber: Box | null = null;
   if (pageTemplate) {
-    const pX = Math.max(0, pageTemplate.x - 6);
-    const pY = Math.max(0, pageTemplate.y - 6);
-    const pWidth = Math.min(style.pageWidth - pX, pageTemplate.width + 12);
-    const pHeight = Math.min(style.pageHeight - pY, Math.max(pageTemplate.height, pageTemplate.fontSize * 1.5) + 12);
-    page.drawRectangle({ x: pX, y: pY, width: pWidth, height: pHeight, color: rgb(1, 1, 1), borderWidth: 0 });
+    const x = Math.max(0, pageTemplate.x - 6);
+    const y = Math.max(0, pageTemplate.y - 6);
+    pageNumber = {
+      x,
+      y,
+      width: Math.min(style.pageWidth - x, pageTemplate.width + 12),
+      height: Math.min(style.pageHeight - y, Math.max(pageTemplate.height, pageTemplate.fontSize * 1.5) + 12),
+    };
   }
+  return { band, lines, pageNumber };
+};
+
+const coverOldBody = (page: PDFPage, analysis: BlueprintAnalysis, outputPageIndex: number) => {
+  const { band, lines, pageNumber } = coverRegions(analysis, outputPageIndex);
+  for (const box of [band, ...lines, pageNumber]) {
+    if (box) page.drawRectangle({ ...box, color: rgb(1, 1, 1), borderWidth: 0 });
+  }
+};
+
+const inBox = (box: Box, x: number, y: number) =>
+  x >= box.x - 1 && x <= box.x + box.width && y >= box.y - 1 && y <= box.y + box.height;
+
+// Removes the covered-up blueprint text itself, so searching or copying the PDF finds only the new paper.
+const stripOldText = (page: PDFPage, analysis: BlueprintAnalysis, outputPageIndex: number, changedFields: BlueprintHeaderField[]) => {
+  const { band, lines, pageNumber } = coverRegions(analysis, outputPageIndex);
+  const fields = changedFields.filter((field) => field.pageIndex === outputPageIndex);
+  return stripPageText(page, (x, y) =>
+    (band !== null && inBox(band, x, y)) ||
+    lines.some((box) => inBox(box, x, y)) ||
+    (pageNumber !== null && inBox(pageNumber, x, y)) ||
+    fields.some((field) => Math.abs(y - field.y) <= 1.5 && x >= field.x - 1 && x <= field.xRight));
 };
 
 const drawPlannedLine = (
@@ -628,36 +675,70 @@ const embedHeaderFieldFont = async (document: PDFDocument, field: BlueprintHeade
   try {
     const response = await fetch(field.bold ? asset.bold : asset.regular);
     if (!response.ok) throw new Error("Font file is unavailable.");
-    return await document.embedFont(new Uint8Array(await response.arrayBuffer()), { subset: false });
+    return await document.embedFont(new Uint8Array(await response.arrayBuffer()), { subset: true });
   } catch {
     return fontFor(fallback, field.bold);
   }
 };
 
-const redrawHeaderFields = async (
-  document: PDFDocument,
-  analysis: BlueprintAnalysis,
-  sections: GeneratedSection[],
-  fonts: PaperFonts,
-  warnings: string[],
-) => {
+// Writes a duration in the blueprint's own style: "3 Hours", "1½ hrs", "90 minutes".
+const formatDurationLike = (sample: string, minutes: number) => {
+  const unit = sample.match(/(hours?|hrs?\.?|minutes?|mins?\.?)/i)?.[1] || "minutes";
+  const capitalised = /^[A-Z]/.test(unit);
+  const applyCase = (word: string) => (capitalised ? word.charAt(0).toUpperCase() + word.slice(1) : word);
+  const hours = minutes / 60;
+  if (/^h/i.test(unit) && Number.isInteger(hours * 2)) {
+    const amount = Number.isInteger(hours) ? String(hours) : `${Math.floor(hours) || ""}½`;
+    const word = /^hrs?/i.test(unit) ? (hours > 1 ? "hrs" : "hr") : (hours > 1 ? "hours" : "hour");
+    return `${amount} ${applyCase(word)}${/\.$/.test(unit) ? "." : ""}`;
+  }
+  const word = /^mins?/i.test(unit) ? "mins" : "minutes";
+  return `${minutes} ${applyCase(word)}`;
+};
+
+const replaceHeaderValue = (field: BlueprintHeaderField, text: string, totalMarks: number, durationMinutes?: number) => {
+  if (field.kind === "marks") {
+    if (totalMarks <= 0 || field.value === totalMarks) return text;
+    return /^\s*\d+\s*$/.test(text)
+      ? String(totalMarks)
+      : text.replace(/((?:max(?:imum)?\.?\s*marks?|total\s*marks?)\s*[:=-]?\s*)\d+/i, `$1${totalMarks}`);
+  }
+  if (!durationMinutes || field.value === durationMinutes) return text;
+  return text.replace(/(\d+(?:\.\d+)?\s*½?|½)\s*(hours?|hrs?\.?|minutes?|mins?\.?)/i, (match) => formatDurationLike(match, durationMinutes));
+};
+
+// Header text items whose values change, with their new text. Marks and time can share one
+// text item, so each item is rewritten once with every change applied.
+const headerFieldChanges = (analysis: BlueprintAnalysis, sections: GeneratedSection[], durationMinutes?: number) => {
   const totalMarks = sections.reduce(
     (sum, section) => sum + section.questions.reduce((sectionSum, question) => sectionSum + (question.marks || 0), 0),
     0,
   );
+  const items = new Map<string, BlueprintHeaderField[]>();
   for (const field of analysis.headerFields) {
-    if (field.kind !== "marks" || totalMarks <= 0 || field.value === totalMarks) continue;
+    const key = `${field.pageIndex}:${field.x}:${field.y}`;
+    items.set(key, [...(items.get(key) || []), field]);
+  }
+  return [...items.values()]
+    .map((group) => ({
+      field: group[0],
+      replaced: group.reduce((text, current) => replaceHeaderValue(current, text, totalMarks, durationMinutes), group[0].text),
+    }))
+    .filter(({ field, replaced }) => replaced !== field.text);
+};
+
+const redrawHeaderFields = async (
+  document: PDFDocument,
+  analysis: BlueprintAnalysis,
+  fonts: PaperFonts,
+  warnings: string[],
+  changes: ReturnType<typeof headerFieldChanges>,
+) => {
+  for (const { field, replaced } of changes) {
     const page = document.getPage(field.pageIndex);
     const style = analysis.pageStyles[field.pageIndex];
     const font = await embedHeaderFieldFont(document, field, fonts);
-    const text = sanitizeText(
-      /^\s*\d+\s*$/.test(field.text)
-        ? String(totalMarks)
-        : field.text.replace(/(\d+)(?!.*\d)/, String(totalMarks)),
-      font,
-      warnings,
-      () => true,
-    );
+    const text = sanitizeText(replaced, font, warnings, () => true);
     const textWidth = font.widthOfTextAtSize(text, field.fontSize);
     // Fields on the right of the header (e.g. "Max Marks: 40") stay flush with their right edge.
     const rightAligned = field.xRight > style.pageWidth * 0.6;
@@ -734,6 +815,7 @@ export const fillBlueprintPdf = async (
   analysis: BlueprintAnalysis,
   generatedSections: GeneratedSection[],
   debug = false,
+  options: { durationMinutes?: number } = {},
 ): Promise<BlueprintFillResult> => {
   const sourceBytes = input instanceof Uint8Array ? input : new Uint8Array(input);
   const warnings = [...analysis.warnings];
@@ -749,15 +831,22 @@ export const fillBlueprintPdf = async (
       const [lastPage] = await document.copyPages(sourceDocument, [sourceDocument.getPageCount() - 1]);
       document.addPage(lastPage);
     }
+    const headerChanges = headerFieldChanges(analysis, generatedSections, options.durationMinutes);
+    let strippedAll = true;
     for (let pageIndex = 0; pageIndex < finalPageCount; pageIndex += 1) {
+      // Remove the old text first (before anything new is drawn), then keep the white boxes for lines and shapes.
+      strippedAll = stripOldText(document.getPage(pageIndex), analysis, pageIndex, headerChanges.map((change) => change.field)) && strippedAll;
       coverOldBody(document.getPage(pageIndex), analysis, pageIndex);
+    }
+    if (!strippedAll) {
+      addWarningOnce(warnings, "Some of the blueprint's original text could only be covered, not removed, so it may still show up if the PDF is searched or copied.");
     }
     for (const [pageIndex, plan] of plans.entries()) {
       const style = analysis.pageStyles[plan.sourcePageIndex];
       const page = document.getPage(pageIndex);
       for (const line of plan.lines) drawPlannedLine(page, line, style, analysis, fonts, warnings);
     }
-    await redrawHeaderFields(document, analysis, generatedSections, fonts, warnings);
+    await redrawHeaderFields(document, analysis, fonts, warnings, headerChanges);
     drawPageNumbers(document, analysis, fonts, warnings, finalPageCount);
     if (debug) drawDebug(document, plans, analysis);
     const report = plans.flatMap((plan, pageIndex) => plan.report.map((row) => ({ ...row, page: pageIndex + 1 })));
