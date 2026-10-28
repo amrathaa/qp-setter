@@ -136,15 +136,16 @@ function App() {
     setDraftEdited(true);
   });
   // A short "Section C removed" note next to the Undo button, so a deletion is easy to take back.
-  const [undoNotice, setUndoNotice] = useState("");
+  // It belongs to the screen it was shown on, so it is hidden once the teacher moves to another step.
+  const [undoNoticeState, setUndoNoticeState] = useState({ step: -1, text: "" });
+  const undoNotice = undoNoticeState.step === activeStep ? undoNoticeState.text : "";
+  const setUndoNotice = (text: string) => setUndoNoticeState({ step: activeStep, text });
   const undoPattern = () => { patternHistory.undo(); setUndoNotice(""); };
   const redoPattern = () => { patternHistory.redo(); setUndoNotice(""); };
   const undoDraft = () => { draftHistory.undo(); setUndoNotice(""); };
   const redoDraft = () => { draftHistory.redo(); setUndoNotice(""); };
   useUndoShortcuts(activeStep === 1, undoPattern, redoPattern);
   useUndoShortcuts(activeStep === 3, undoDraft, redoDraft);
-  // The notice belongs to the screen it was shown on.
-  useEffect(() => setUndoNotice(""), [activeStep]);
 
   // Storage and Help
   const [recentPapers, setRecentPapers] = useState<StoredPaper[]>(() => loadRecentPapers());
