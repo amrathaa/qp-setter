@@ -3,22 +3,28 @@ import { PDFDocument, StandardFonts, rgb, type PDFFont, type PDFPage } from "pdf
 import type { GeneratedQuestion, GeneratedSection } from "./blueprint";
 import { toRomanNumeral } from "./text-cleaner";
 
-export type AnswerKeyLine = { label: string; text: string };
+export type AnswerKeyLine = { label: string; text: string; keywords?: string[] };
 
 const stripNumber = (text: string) => text.replace(/^\s*\d+[.)]\s*/, "");
 
+const missing = "No matching passage was found in the textbook. Add the model answer on the review screen.";
+
 /**
- * The answer for one question as label/text rows, e.g. "Answer: b) cells" or "(ii) Key point: ...".
+ * The answer for one question as label/text rows, e.g. "Answer: b) cells" or a model answer with its keywords.
  * MCQ answers are matched to the current options, so a teacher's edits to the options are respected.
  */
 export function answerLinesFor(question: GeneratedQuestion): AnswerKeyLine[] {
   if (question.parts?.length) {
     return question.parts.flatMap((part, index) => {
       const label = `(${toRomanNumeral(index + 1)})`;
-      const kind = /^fill in the blank/i.test(part.text) ? "Answer" : "Key point";
-      const lines = [{ label, text: part.answer ? `${kind}: ${part.answer}` : "Answer from the passage." }];
+      const isBlank = /^fill in the blank/i.test(part.text);
+      const lines: AnswerKeyLine[] = [{
+        label: isBlank ? `${label} Answer` : `${label} Model answer`,
+        text: part.answer || missing,
+        keywords: isBlank ? undefined : part.keywords,
+      }];
       if (part.alternative) {
-        lines.push({ label: `${label} OR`, text: part.alternative.answer ? `Any relevant points from the passage: ${part.alternative.answer}` : "Answer from the passage." });
+        lines.push({ label: `${label} OR`, text: part.alternative.answer || missing, keywords: part.alternative.keywords });
       }
       return lines;
     });
@@ -32,9 +38,9 @@ export function answerLinesFor(question: GeneratedQuestion): AnswerKeyLine[] {
         : "Not set. Choose the correct option on the review screen.",
     }];
   }
-  const lines = [{ label: "Key point", text: question.answer || "Answer from the chapter (no single source sentence)." }];
+  const lines: AnswerKeyLine[] = [{ label: "Model answer", text: question.answer || missing, keywords: question.answerKeywords }];
   if (question.alternative) {
-    lines.push({ label: "OR", text: question.alternativeAnswer || "Answer from the chapter (no single source sentence)." });
+    lines.push({ label: "OR", text: question.alternativeAnswer || missing, keywords: question.alternativeKeywords });
   }
   return lines;
 }
@@ -105,6 +111,42 @@ export async function createAnswerKeyPdf(
     }
   };
 
+  // A word counts as a keyword match when it is the keyword or a close form of it ("cell"/"cells").
+  const matchesKeyword = (word: string, keywords: string[]) => {
+    const plain = word.toLowerCase().replace(/[^a-z0-9-]/g, "");
+    return plain.length > 1 && keywords.some((keyword) => {
+      const key = keyword.toLowerCase();
+      return plain === key || (plain.startsWith(key) && plain.length - key.length <= 2) || (key.startsWith(plain) && key.length - plain.length <= 1);
+    });
+  };
+  // Wraps text word by word, drawing keyword matches in bold.
+  const writeHighlighted = (text: string, keywords: string[], size: number, x: number, lineWidth: number) => {
+    const space = regular.widthOfTextAtSize(" ", size);
+    let line: Array<{ text: string; font: PDFFont }> = [];
+    let used = 0;
+    const flush = () => {
+      if (!line.length) return;
+      ensureSpace(size * 1.35);
+      let cursor = x;
+      for (const word of line) {
+        page.drawText(word.text, { x: cursor, y: y - size, size, font: word.font, color: rgb(0, 0, 0) });
+        cursor += word.font.widthOfTextAtSize(word.text, size) + space;
+      }
+      y -= size * 1.35;
+      line = [];
+      used = 0;
+    };
+    for (const raw of text.split(/\s+/).filter(Boolean)) {
+      const font = matchesKeyword(raw, keywords) ? bold : regular;
+      const word = safeText(font, raw);
+      const wordWidth = font.widthOfTextAtSize(word, size);
+      if (line.length && used + space + wordWidth > lineWidth) flush();
+      used += (line.length ? space : 0) + wordWidth;
+      line.push({ text: word, font });
+    }
+    flush();
+  };
+
   write(`Answer Key - ${title}`, bold, 15);
   write(`For teachers only. Total: ${totalMarks} marks.`, regular, 10);
   y -= 8;
@@ -125,6 +167,20 @@ export async function createAnswerKeyPdf(
       write(`${number}. ${stem.length > 140 ? `${stem.slice(0, 137)}...` : stem}`, regular, 9, margin, width);
       for (const line of answerLinesFor(question)) {
         const labelText = safeText(bold, `${line.label}:`);
+        if (line.keywords) {
+          // Long answers: label, then the textbook answer with its keywords in bold, then the keyword list.
+          write(labelText, bold, 10, margin + 14, width - 14);
+          writeHighlighted(line.text, line.keywords, 10, margin + 24, width - 24);
+          if (line.keywords.length) {
+            const listLabel = "Keywords to look for: ";
+            ensureSpace(14);
+            page.drawText(listLabel, { x: margin + 24, y: y - 9, size: 9, font: bold, color: rgb(0, 0, 0) });
+            const offset = bold.widthOfTextAtSize(listLabel, 9);
+            write(line.keywords.join(", "), regular, 9, margin + 24 + offset, width - 24 - offset);
+          }
+          y -= 3;
+          continue;
+        }
         const labelWidth = bold.widthOfTextAtSize(labelText, 10) + 6;
         ensureSpace(14);
         page.drawText(labelText, { x: margin + 14, y: y - 10, size: 10, font: bold, color: rgb(0, 0, 0) });

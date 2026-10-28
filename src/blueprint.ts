@@ -139,7 +139,8 @@ export type GeneratedQuestionPart = {
   text: string;
   marks: number;
   answer?: string;
-  alternative?: { text: string; answer?: string };
+  keywords?: string[];
+  alternative?: { text: string; answer?: string; keywords?: string[] };
 };
 
 export type GeneratedQuestion = {
@@ -149,7 +150,10 @@ export type GeneratedQuestion = {
   alternative?: string | { text: string; options?: string[] };
   /** MCQ: the correct option's text. Written questions: the key textbook point for marking. */
   answer?: string;
+  /** Key terms a marker looks for; highlighted in the answer key. */
+  answerKeywords?: string[];
   alternativeAnswer?: string;
+  alternativeKeywords?: string[];
   /** Case-based questions: the passage is `text`, followed by these sub-questions. */
   kind?: "case";
   parts?: GeneratedQuestionPart[];

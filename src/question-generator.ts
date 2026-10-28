@@ -13,7 +13,7 @@ export const isCaseBasedSection = (section: { marks: number; caseBased?: boolean
   section.caseBased ?? section.marks === 4;
 
 // Sentences that only make sense inside the textbook's own narration ("Let us...", "Can you think...").
-const narrationPattern = /\([a-d]\)|^(it|this|these|that|those|they|he|she|we|let|can|think|but|and|or|so|now|here|on the other hand|however|such|therefore|thus|hence|similarly|also|compare|observe|take|find|look|draw|discuss|try|note|see|place|collect|consider|imagine|arrange|for this|never|always|do not|now|add|put|mix|pour|heat|dip|stir|repeat|record|cover|balance|name|state|give|write|explain|define|list|identify|describe|mention|what|which|why|how)\b|\bto think of\b|\b(we|us|our|you|your|let's)\b|\b(classroom|next chapter|previous chapter|class\s+(?:ix|viii|x)|activity|activities|figure|fig\.)|\b(chapter|section|table)\s+\d/i;
+const narrationPattern = /\([a-d]\)|^(it|this|these|that|those|they|he|she|we|let|can|think|but|and|or|so|now|here|on the other hand|however|such|therefore|thus|hence|similarly|also|compare|observe|take|find|look|draw|discuss|try|note|see|place|collect|consider|imagine|arrange|for this|make sure|ensure|never|always|do not|now|add|put|mix|pour|heat|dip|stir|repeat|record|cover|balance|name|state|give|write|explain|define|list|identify|describe|mention|what|which|why|how)\b|\bto think of\b|\b(we|us|our|you|your|let's)\b|\b(classroom|next chapter|previous chapter|class\s+(?:ix|viii|x)|activity|activities|figure|fig\.)|\b(chapter|section|table)\s+\d/i;
 
 // Chemical equations lose their subscripts in PDF text ("CaCO s Ca(HCO aq3 3( ) )"), so they are left out.
 const garbledEquation = (sentence: string) => {
@@ -35,7 +35,7 @@ export function extractCleanSentences(text: string): string[] {
 /**
  * All readable sentences in textbook order (used to cut out case-study passages).
  */
-function extractTextbookSentences(text: string): string[] {
+export function extractTextbookSentences(text: string): string[] {
   return text
     .replace(/([A-Za-z])-\s+([a-z])/g, "$1-$2")
     .split(/(?<=[.!?])\s+/)
@@ -200,11 +200,143 @@ export function generateSingleQuestion(
   questionIndex: number,
   allSentences: string[],
   usedSentences: Set<string> = new Set(),
+  // The full textbook text, so topic-level answers can come from the topic's own section.
+  textbookText = "",
 ): GeneratedQuestion {
   const question = draftQuestion(topicRaw, sourceSentenceRaw, marks, difficulty, questionIndex, allSentences, usedSentences);
-  if (question.answer || question.options) return question;
+  if (question.options) return question;
+  // Written questions get a model answer taken from the textbook, with its key terms.
   const source = sourceSentenceRaw.trim();
-  return source ? { ...question, answer: source } : question;
+  const model = (source ? buildModelAnswer(allSentences, marks, source, topicRaw) : null) ||
+    sectionModelAnswer(textbookText, topicRaw, marks, allSentences) ||
+    buildModelAnswer(allSentences, marks, "", topicRaw);
+  const withAnswer: GeneratedQuestion = model
+    ? { ...question, answer: model.answer, answerKeywords: model.keywords }
+    : question;
+  if (question.alternative && question.alternativeAnswer) {
+    const altModel = buildModelAnswer(allSentences, marks, question.alternativeAnswer);
+    if (altModel) return { ...withAnswer, alternativeAnswer: altModel.answer, alternativeKeywords: altModel.keywords };
+  }
+  return withAnswer;
+}
+
+/** How many textbook sentences a full-marks answer usually needs. */
+const answerLength = (marks: number) => (marks <= 2 ? 2 : marks === 3 ? 3 : marks === 4 ? 4 : 5);
+
+/**
+ * A model answer made of textbook sentences: the question's source sentence and the sentences
+ * that follow it on the same idea, or (with no source) the chapter's sentences about the topic.
+ * Returns the key terms a marker should look for alongside it.
+ */
+export function buildModelAnswer(
+  allSentences: string[],
+  marks: number,
+  anchor: string,
+  topicRaw?: string,
+  // Restricts the answer to these sentences (a case-based passage); defaults to the whole chapter.
+  pool: string[] = allSentences,
+): { answer: string; keywords: string[] } | null {
+  const vocabulary = keyTermVocabulary(allSentences);
+  const termsOf = (sentence: string) =>
+    new Set((sentence.match(/[A-Za-z][A-Za-z-]*[A-Za-z]/g) || [])
+      .map((word) => word.toLowerCase())
+      .filter((word) => (vocabulary.get(word)?.score || 0) >= 1));
+  const wanted = answerLength(marks);
+  // Words found all over the chapter ("organisms", "reproduction") say nothing about what a sentence is about.
+  const lowerChapter = allSentences.map((sentence) => sentence.toLowerCase());
+  const specific = (word: string) => lowerChapter.filter((sentence) => sentence.includes(word)).length <= 8;
+  // Only the topic's most distinctive word decides what is "about the topic"; a shorter answer beats an off-topic one.
+  const keyWord = topicRaw ? topicKeyWord(topicRaw, pool) : undefined;
+  const aboutTopic = (sentence: string) => !!keyWord && sentence.toLowerCase().includes(keyWord);
+  const picked: string[] = [];
+  const start = anchor ? pool.indexOf(anchor) : -1;
+  if (start >= 0) {
+    // The anchor and the sentences right after it that stay on its subject: they must share one of
+    // its specific terms (not a general word like "organisms"), and one off-topic sentence ends the run.
+    const anchorTerms = new Set([...termsOf(anchor)].filter((term) => (vocabulary.get(term)?.score || 0) >= 2 && specific(term)));
+    picked.push(anchor);
+    let misses = 0;
+    for (let index = start + 1; index < pool.length && picked.length < wanted && misses < 2; index += 1) {
+      const sentence = pool[index];
+      const shares = [...termsOf(sentence)].some((term) => anchorTerms.has(term)) || aboutTopic(sentence);
+      if (shares) picked.push(sentence);
+      else misses += 1;
+    }
+  } else if (anchor) {
+    picked.push(anchor);
+  }
+  // Top up from anywhere in the chapter that discusses the topic.
+  if (keyWord) {
+    for (const sentence of pool) {
+      if (picked.length >= wanted) break;
+      if (!picked.includes(sentence) && aboutTopic(sentence)) picked.push(sentence);
+    }
+  }
+  if (!picked.length) return null;
+  // Keep the textbook's order so the answer reads as a paragraph.
+  picked.sort((a, b) => pool.indexOf(a) - pool.indexOf(b));
+
+  return { answer: picked.join(" "), keywords: answerKeywordsFor(picked, marks, allSentences, keyWord) };
+}
+
+/**
+ * The key terms a marker looks for in an answer: its most specific chapter terms, the topic word,
+ * or (failing those) its longest content words and acronyms such as DNA.
+ */
+function answerKeywordsFor(picked: string[], marks: number, allSentences: string[], keyWord?: string): string[] {
+  const vocabulary = keyTermVocabulary(allSentences);
+  const termsOf = (sentence: string) =>
+    new Set((sentence.match(/[A-Za-z][A-Za-z-]*[A-Za-z]/g) || [])
+      .map((word) => word.toLowerCase())
+      .filter((word) => (vocabulary.get(word)?.score || 0) >= 1));
+  const counts = new Map<string, number>();
+  for (const sentence of picked) for (const term of termsOf(sentence)) counts.set(term, (counts.get(term) || 0) + 1);
+  // Words used all over the chapter ("organisms") don't help a marker; keep them only if nothing else is left.
+  const lowerChapter = allSentences.map((sentence) => sentence.toLowerCase());
+  const chapterWide = (term: string) => lowerChapter.filter((sentence) => sentence.includes(term)).length > Math.max(6, lowerChapter.length * 0.05);
+  const specificTerms = [...counts.keys()].filter((term) => !chapterWide(term));
+  const keywords = (specificTerms.length ? specificTerms : [...counts.keys()])
+    .sort((a, b) => (vocabulary.get(b)?.score || 0) - (vocabulary.get(a)?.score || 0) || (counts.get(b) || 0) - (counts.get(a) || 0))
+    .slice(0, Math.min(8, 2 + marks))
+    .map((key) => vocabulary.get(key)?.term || key);
+  if (keyWord && !keywords.some((term) => term.toLowerCase() === keyWord)) keywords.unshift(keyWord);
+  // With no chapter key terms in the answer, fall back to its longest content words and acronyms (DNA).
+  if (!keywords.length) {
+    const words = picked.join(" ").match(/\b([A-Z]{2,}|[a-z]{6,})\b/g) || [];
+    keywords.push(...[...new Set(words)]
+      .filter((word) => !commonWords.has(word.toLowerCase()) && (/^[A-Z]+$/.test(word) || !/(ed|ing|ly)$/.test(word)))
+      .sort((a, b) => b.length - a.length)
+      .slice(0, 3));
+  }
+  return keywords;
+}
+
+/**
+ * Model answer for a topic as a whole: the opening sentences of the topic's own section in the
+ * textbook ("7.2.2 Fragmentation" -> "Spirogyra ... simply breaks up into smaller pieces ...").
+ */
+function sectionModelAnswer(textbookText: string, topicRaw: string, marks: number, allSentences: string[]) {
+  const section = topicSectionSentences(textbookText, topicRaw);
+  if (!section.length) return null;
+  const picked = section.slice(0, answerLength(marks));
+  return { answer: picked.join(" "), keywords: answerKeywordsFor(picked, marks, allSentences, topicKeyWord(topicRaw, picked)) };
+}
+
+/**
+ * The complete statements printed under a numbered heading, up to the next heading.
+ */
+export function topicSectionSentences(textbookText: string, topicRaw: string): string[] {
+  const marker = topicRaw.trim().match(/^(\d+(?:\.\d+)+)\s/)?.[1];
+  if (!marker || !textbookText) return [];
+  const lines = textbookText.split(/\r?\n/);
+  const start = lines.findIndex((line) => line.trim().startsWith(`${marker} `));
+  if (start < 0) return [];
+  const body: string[] = [];
+  for (let index = start + 1; index < lines.length; index += 1) {
+    if (/^\s*\d+\.\d+(?:\.\d+)*\s+[A-Z]/.test(lines[index])) break;
+    body.push(lines[index]);
+  }
+  return extractTextbookSentences(body.join("\n")).filter((sentence) => passageSentenceOk(sentence));
 }
 
 function draftQuestion(
@@ -370,6 +502,11 @@ function draftQuestion(
  * Human Beings"), so matching does not hinge on a common word like "formation" or "reproduction".
  */
 function topicKeyWord(topic: string, sentences: string[]): string | undefined {
+  return topicKeyWords(topic, sentences)[0];
+}
+
+// The topic's words that the chapter actually uses, rarest (most distinctive) first.
+function topicKeyWords(topic: string, sentences: string[]): string[] {
   const lowerSentences = sentences.map((s) => s.toLowerCase());
   return cleanTopicName(topic)
     .toLowerCase()
@@ -379,14 +516,15 @@ function topicKeyWord(topic: string, sentences: string[]): string | undefined {
     .filter((w) => w.length > 3 && !commonWords.has(w) && !/^(with|what|when|does|have|happens|each|really|more|about|from|into)$/.test(w))
     .map((word) => ({ word, count: lowerSentences.filter((s) => s.includes(word)).length }))
     .filter((entry) => entry.count > 0)
-    .sort((a, b) => a.count - b.count)[0]?.word;
+    .sort((a, b) => a.count - b.count)
+    .map((entry) => entry.word);
 }
 
 // Passage sentences must be complete statements: no activity steps, figure references or cut-off brackets.
 const passageSentenceOk = (sentence: string) =>
   /\.$/.test(sentence) &&
   !/\([a-d]\)|\b(activity|figure|fig\.?|exercise)\b|\(fig/i.test(sentence) &&
-  !/^(place|note|take|observe|look|find|try|draw|discuss|let|keep|cut|put|add|remove|collect|compare|now|write|balance|mix|pour|heat|dip|stir|repeat|record)\b/i.test(sentence) &&
+  !/^(place|note|take|observe|look|find|try|draw|discuss|let|keep|cut|put|add|remove|collect|compare|now|write|balance|mix|pour|heat|dip|stir|repeat|record|make sure|ensure|never|always|do not)\b/i.test(sentence) &&
   !/\b(you|your|we|us|let's)\b/i.test(sentence) &&
   (sentence.match(/\(/g) || []).length === (sentence.match(/\)/g) || []).length;
 
@@ -409,6 +547,8 @@ export function generateCaseQuestion(
   const ordered = extractTextbookSentences(textbookText);
   const allSentences = extractCleanSentences(textbookText);
   const keyWord = topicKeyWord(topicRaw, ordered);
+  // A topic the chapter never mentions outside its heading has no passage of its own.
+  if (!keyWord) return null;
 
   // Runs of 3-4 consecutive textbook sentences that open with the topic and read as one paragraph.
   const windows: string[][] = [];
@@ -477,6 +617,12 @@ export function generateCaseQuestion(
       ? `Explain the statement ${focusQuote} What would happen if it were not true?`
       : `Explain the following statement from the passage: ${focusQuote}`;
 
+  // Part answers come from the passage itself, with the key terms to look for.
+  const caseAnswer = (anchor: string, wholePassage = false) => {
+    const model = buildModelAnswer(allSentences, wholePassage ? lastMarks + 1 : lastMarks, anchor, wholePassage ? topicRaw : undefined, passage);
+    return { answer: model?.answer || anchor, keywords: model?.keywords };
+  };
+
   passage.forEach((sentence) => usedSentences.add(sentence));
   return {
     kind: "case",
@@ -488,9 +634,9 @@ export function generateCaseQuestion(
       {
         text: partThreeText,
         marks: lastMarks,
-        answer: focus,
+        ...caseAnswer(focus),
         alternative: lastMarks >= 2
-          ? { text: asked ? `Based on the passage, answer in ${lastMarks >= 3 ? "three" : "two"} points: ${asked}` : `Based on the passage, state ${lastMarks >= 3 ? "three" : "two"} important points about ${topic}.`, answer: passage.join(" ") }
+          ? { text: asked ? `Based on the passage, answer in ${lastMarks >= 3 ? "three" : "two"} points: ${asked}` : `Based on the passage, state ${lastMarks >= 3 ? "three" : "two"} important points about ${topic}.`, ...caseAnswer(passage[0], true) }
           : undefined,
       },
     ],
@@ -550,6 +696,7 @@ export function draftQuestionSections(
           globalQuestionCounter + 1,
           sentences,
           usedSentences,
+          textbookText,
         );
         if (!usedTexts.has(q.text)) break;
       }

@@ -32,6 +32,8 @@ import {
 } from "./storage";
 import { joinPdfPages, cleanBrokenKerningWords } from "./text-cleaner";
 import { findTopics } from "./topic-finder";
+import { ModelAnswerEditor } from "./model-answer-editor";
+import { useUndoHistory, useUndoShortcuts } from "./use-undo-history";
 import "./App.css";
 
 // The PDF and Word libraries are large, so they load only when a file is read or a paper is built.
@@ -122,6 +124,27 @@ function App() {
   const [isGeneratingPdf, setIsGeneratingPdf] = useState(false);
   const [generatedPdf, setGeneratedPdf] = useState<Blob | null>(null);
   const [generated, setGenerated] = useState(false);
+
+  // Undo/redo for the pattern (step 2) and the drafted questions (step 4).
+  const patternHistory = useUndoHistory({ sections: patternSections, duration }, (snapshot) => {
+    setPatternSections(snapshot.sections);
+    setDuration(snapshot.duration);
+  });
+  const draftHistory = useUndoHistory({ sections: draftedSections, difficulty }, (snapshot) => {
+    setDraftedSections(snapshot.sections);
+    setDifficulty(snapshot.difficulty);
+    setDraftEdited(true);
+  });
+  // A short "Section C removed" note next to the Undo button, so a deletion is easy to take back.
+  const [undoNotice, setUndoNotice] = useState("");
+  const undoPattern = () => { patternHistory.undo(); setUndoNotice(""); };
+  const redoPattern = () => { patternHistory.redo(); setUndoNotice(""); };
+  const undoDraft = () => { draftHistory.undo(); setUndoNotice(""); };
+  const redoDraft = () => { draftHistory.redo(); setUndoNotice(""); };
+  useUndoShortcuts(activeStep === 1, undoPattern, redoPattern);
+  useUndoShortcuts(activeStep === 3, undoDraft, redoDraft);
+  // The notice belongs to the screen it was shown on.
+  useEffect(() => setUndoNotice(""), [activeStep]);
 
   // Storage and Help
   const [recentPapers, setRecentPapers] = useState<StoredPaper[]>(() => loadRecentPapers());
@@ -348,6 +371,7 @@ function App() {
     JSON.stringify([textbookText.length, textbookText.slice(0, 500), selectedTopics, patternSections, level]);
 
   const redraft = (level = difficulty) => {
+    draftHistory.record();
     setDraftedSections(
       draftQuestionSections({
         textbookText,
@@ -365,7 +389,7 @@ function App() {
   // Entering the review step keeps the current draft (and any edits) unless its inputs changed.
   const refreshDraftOnEnter = () => {
     if (draftSourceKey(difficulty) === draftSource) return;
-    if (!confirmDiscardEdits("Your textbook, topics or pattern changed since these questions were drafted. Redraft them now? Your edits on the review screen will be lost.")) return;
+    if (!confirmDiscardEdits("Your textbook, topics or pattern changed since these questions were drafted. Redraft them now? You can bring your edits back with Undo on the review screen.")) return;
     redraft();
   };
 
@@ -385,7 +409,9 @@ function App() {
     index: number,
     field: "count" | "marks" | "label" | "caseBased",
     value: any,
-  ) =>
+  ) => {
+    // Typing in one field is a single undo step; ticking "Case-based" is its own.
+    patternHistory.record(field === "caseBased" ? undefined : `${field}-${index}`);
     setPatternSections((current) =>
       current.map((section, sectionIndex) =>
         sectionIndex === index
@@ -401,8 +427,16 @@ function App() {
           : section,
       ),
     );
+  };
 
-  const addPatternSection = () =>
+  const updateDuration = (value: number) => {
+    patternHistory.record("duration");
+    setDuration(Math.max(1, value));
+  };
+
+  const addPatternSection = () => {
+    patternHistory.record();
+    setUndoNotice("");
     setPatternSections((current) => [
       ...current,
       {
@@ -411,9 +445,12 @@ function App() {
         label: `Section ${String.fromCharCode(65 + current.length)}`,
       },
     ]);
+  };
 
   const removePatternSection = (index: number) => {
     if (patternSections.length <= 1) return;
+    patternHistory.record();
+    setUndoNotice(`${patternSections[index]?.label || `Section ${String.fromCharCode(65 + index)}`} removed.`);
     setPatternSections((current) => current.filter((_, i) => i !== index));
   };
 
@@ -430,6 +467,7 @@ function App() {
         );
         return;
       }
+      patternHistory.record();
       setPatternSections(parsed.sections);
       if (parsed.duration) {
         setDuration(parsed.duration);
@@ -475,6 +513,7 @@ function App() {
 
   // Step 4 Question Editing Handlers
   const updateQuestionText = (sectionIndex: number, questionIndex: number, newText: string) => {
+    draftHistory.record(`text-${sectionIndex}-${questionIndex}`);
     setDraftEdited(true);
     setDraftedSections((prev) =>
       prev.map((s, sIdx) =>
@@ -496,6 +535,7 @@ function App() {
     optIndex: number,
     newOptText: string,
   ) => {
+    draftHistory.record(`option-${sectionIndex}-${questionIndex}-${optIndex}`);
     setDraftEdited(true);
     setDraftedSections((prev) =>
       prev.map((s, sIdx) =>
@@ -525,6 +565,7 @@ function App() {
     questionIndex: number,
     newAltText: string,
   ) => {
+    draftHistory.record(`alternative-${sectionIndex}-${questionIndex}`);
     setDraftEdited(true);
     setDraftedSections((prev) =>
       prev.map((s, sIdx) =>
@@ -545,7 +586,10 @@ function App() {
     sectionIndex: number,
     questionIndex: number,
     patch: (question: GeneratedQuestion) => GeneratedQuestion,
+    // Edits under the same key in quick succession (typing) undo together.
+    historyKey = `question-${sectionIndex}-${questionIndex}`,
   ) => {
+    draftHistory.record(historyKey);
     setDraftEdited(true);
     setDraftedSections((prev) =>
       prev.map((s, sIdx) =>
@@ -575,7 +619,7 @@ function App() {
             ? { ...part, alternative: { ...part.alternative, text: value } }
             : { ...part, [field]: value },
       ),
-    }));
+    }), `part-${sectionIndex}-${questionIndex}-${partIndex}-${field}`);
 
   // Each regenerate picks a different passage for case-based questions.
   const regenerateCount = useRef(0);
@@ -597,8 +641,12 @@ function App() {
       difficulty,
       questionIndex + 1,
       sentences,
+      new Set(),
+      textbookText,
     );
 
+    draftHistory.record();
+    setUndoNotice("");
     setDraftEdited(true);
     setDraftedSections((prev) =>
       renumberSections(prev.map((s, sIdx) =>
@@ -615,6 +663,8 @@ function App() {
   };
 
   const deleteQuestionFromSection = (sectionIndex: number, questionIndex: number) => {
+    draftHistory.record();
+    setUndoNotice(`Question ${questionIndex + 1} removed from ${draftedSections[sectionIndex]?.label || "this section"}.`);
     setDraftEdited(true);
     setDraftedSections((prev) =>
       renumberSections(prev.map((s, sIdx) =>
@@ -636,6 +686,8 @@ function App() {
       text: "State and explain the key principle regarding this concept.",
       marks,
     };
+    draftHistory.record();
+    setUndoNotice("");
     setDraftEdited(true);
     setDraftedSections((prev) =>
       renumberSections(prev.map((s, sIdx) =>
@@ -1297,6 +1349,15 @@ function App() {
 
                     {patternMode === "manual" ? (
                       <div className="pattern-builder">
+                        <div className="undo-bar">
+                          {undoNotice && <span className="undo-notice">{undoNotice}</span>}
+                          <button type="button" className="q-action-btn" onClick={undoPattern} disabled={!patternHistory.canUndo} title="Undo (Ctrl+Z)">
+                            ↶ Undo
+                          </button>
+                          <button type="button" className="q-action-btn" onClick={redoPattern} disabled={!patternHistory.canRedo} title="Redo (Ctrl+Y)">
+                            ↷ Redo
+                          </button>
+                        </div>
                         <div className="pattern-labels">
                           <span>Section &amp; Count</span>
                           <span>Marks</span>
@@ -1370,9 +1431,7 @@ function App() {
                             type="number"
                             min="1"
                             value={duration}
-                            onChange={(event) =>
-                              setDuration(Math.max(1, Number(event.target.value)))
-                            }
+                            onChange={(event) => updateDuration(Number(event.target.value))}
                           />
                         </label>
                       </div>
@@ -1588,7 +1647,7 @@ function App() {
                             className={`difficulty ${level.toLowerCase()} ${difficulty === level ? "active-diff" : ""}`}
                             onClick={() => {
                               if (level === difficulty) return;
-                              if (!confirmDiscardEdits(`Switching to ${level} redrafts all questions. Your edits will be lost. Continue?`)) return;
+                              if (!confirmDiscardEdits(`Switching to ${level} redrafts all questions. You can bring your edits back with Undo. Continue?`)) return;
                               setDifficulty(level);
                               redraft(level);
                             }}
@@ -1611,15 +1670,24 @@ function App() {
                             {draftedTotalMarks !== totalMarks && ` (your pattern was ${totalMarks} marks)`}.
                           </p>
                         </div>
-                        <button
-                          className="q-action-btn"
-                          onClick={() => {
-                            if (!confirmDiscardEdits("Redraft all questions? Your edits will be lost.")) return;
-                            redraft();
-                          }}
-                        >
-                          ↻ Redraft all
-                        </button>
+                        <div className="undo-bar">
+                          {undoNotice && <span className="undo-notice">{undoNotice}</span>}
+                          <button type="button" className="q-action-btn" onClick={undoDraft} disabled={!draftHistory.canUndo} title="Undo (Ctrl+Z)">
+                            ↶ Undo
+                          </button>
+                          <button type="button" className="q-action-btn" onClick={redoDraft} disabled={!draftHistory.canRedo} title="Redo (Ctrl+Y)">
+                            ↷ Redo
+                          </button>
+                          <button
+                            className="q-action-btn"
+                            onClick={() => {
+                              if (!confirmDiscardEdits("Redraft all questions? You can bring your edits back with Undo.")) return;
+                              redraft();
+                            }}
+                          >
+                            ↻ Redraft all
+                          </button>
+                        </div>
                       </div>
 
                       {draftedSections.map((section, sIdx) => (
@@ -1719,14 +1787,27 @@ function App() {
                                           />
                                         </>
                                       )}
-                                      <label className="answer-wrap">
-                                        <strong>Answer key:</strong>
-                                        <input
-                                          type="text"
-                                          value={part.answer || ""}
-                                          onChange={(e) => updateQuestionPart(sIdx, qIdx, pIdx, "answer", e.target.value)}
+                                      {/^fill in the blank/i.test(part.text) ? (
+                                        <label className="answer-wrap">
+                                          <strong>Answer:</strong>
+                                          <input
+                                            type="text"
+                                            value={part.answer || ""}
+                                            onChange={(e) => updateQuestionPart(sIdx, qIdx, pIdx, "answer", e.target.value)}
+                                          />
+                                        </label>
+                                      ) : (
+                                        <ModelAnswerEditor
+                                          label="Model answer"
+                                          answer={part.answer}
+                                          keywords={part.keywords}
+                                          onAnswer={(value) => updateQuestionPart(sIdx, qIdx, pIdx, "answer", value)}
+                                          onKeywords={(value) => patchQuestion(sIdx, qIdx, (question) => ({
+                                            ...question,
+                                            parts: question.parts?.map((p, i) => (i === pIdx ? { ...p, keywords: value } : p)),
+                                          }))}
                                         />
-                                      </label>
+                                      )}
                                     </div>
                                   ))}
 
@@ -1743,15 +1824,22 @@ function App() {
                                   )}
 
                                   {!q.options?.length && !q.parts?.length && (
-                                    <label className="answer-wrap">
-                                      <strong>Key point for marking:</strong>
-                                      <input
-                                        type="text"
-                                        value={q.answer || ""}
-                                        placeholder="What a full-marks answer must mention"
-                                        onChange={(e) => updateQuestionAnswer(sIdx, qIdx, e.target.value)}
-                                      />
-                                    </label>
+                                    <ModelAnswerEditor
+                                      label="Model answer (from the textbook)"
+                                      answer={q.answer}
+                                      keywords={q.answerKeywords}
+                                      onAnswer={(value) => updateQuestionAnswer(sIdx, qIdx, value)}
+                                      onKeywords={(value) => patchQuestion(sIdx, qIdx, (question) => ({ ...question, answerKeywords: value }))}
+                                    />
+                                  )}
+                                  {!q.options?.length && !q.parts?.length && q.alternative && (
+                                    <ModelAnswerEditor
+                                      label="OR choice: model answer"
+                                      answer={q.alternativeAnswer}
+                                      keywords={q.alternativeKeywords}
+                                      onAnswer={(value) => patchQuestion(sIdx, qIdx, (question) => ({ ...question, alternativeAnswer: value }))}
+                                      onKeywords={(value) => patchQuestion(sIdx, qIdx, (question) => ({ ...question, alternativeKeywords: value }))}
+                                    />
                                   )}
                                 </div>
                               ))}
