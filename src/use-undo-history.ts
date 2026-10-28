@@ -12,8 +12,9 @@ export function useUndoHistory<T>(current: T, restore: (value: T) => void) {
   const past = useRef<T[]>([]);
   const future = useRef<T[]>([]);
   const lastEdit = useRef<{ key: string; time: number } | null>(null);
-  const [, setVersion] = useState(0);
-  const bump = () => setVersion((v) => v + 1);
+  // The history sizes live in state too, so the Undo/Redo buttons re-render when they change.
+  const [sizes, setSizes] = useState({ past: 0, future: 0 });
+  const bump = () => setSizes({ past: past.current.length, future: future.current.length });
 
   const record = (key?: string) => {
     const now = Date.now();
@@ -46,7 +47,7 @@ export function useUndoHistory<T>(current: T, restore: (value: T) => void) {
     bump();
   };
 
-  return { record, undo, redo, canUndo: past.current.length > 0, canRedo: future.current.length > 0 };
+  return { record, undo, redo, canUndo: sizes.past > 0, canRedo: sizes.future > 0 };
 }
 
 /**
@@ -55,7 +56,9 @@ export function useUndoHistory<T>(current: T, restore: (value: T) => void) {
  */
 export function useUndoShortcuts(active: boolean, undo: () => void, redo: () => void) {
   const handlers = useRef({ undo, redo });
-  handlers.current = { undo, redo };
+  useEffect(() => {
+    handlers.current = { undo, redo };
+  });
   useEffect(() => {
     if (!active) return;
     const onKey = (event: KeyboardEvent) => {

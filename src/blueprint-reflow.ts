@@ -671,11 +671,14 @@ const headerFieldFontAssets: Record<BlueprintAnalysis["paperFont"], FontAsset> =
 };
 
 const embedHeaderFieldFont = async (document: PDFDocument, field: BlueprintHeaderField, fallback: PaperFonts) => {
-  const asset = headerFieldFontAssets[mapPaperFont(field.fontName)];
+  const family = mapPaperFont(field.fontName);
+  const asset = headerFieldFontAssets[family];
   try {
     const response = await fetch(field.bold ? asset.bold : asset.regular);
     if (!response.ok) throw new Error("Font file is unavailable.");
-    return await document.embedFont(new Uint8Array(await response.arrayBuffer()), { subset: true });
+    // pdf-lib's subsetting corrupts many Carlito glyphs ("Max Marks" printed as "M  M rks"),
+    // so Carlito is embedded whole; the Liberation fonts subset cleanly.
+    return await document.embedFont(new Uint8Array(await response.arrayBuffer()), { subset: family !== "carlito" });
   } catch {
     return fontFor(fallback, field.bold);
   }

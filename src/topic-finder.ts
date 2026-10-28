@@ -1,4 +1,13 @@
 /**
+ * A heading that wraps ("3.4.5 Extracting Metals towards the Top of the" / "Activity Series")
+ * continues on the next line when it ends on a small word or the next line closes a question.
+ */
+export const headingContinues = (label: string, next: string | undefined) =>
+  !!next && next.length <= 60 && !/^\d/.test(next) && /^[A-Z]/.test(next) && !/[.?!]$/.test(label) &&
+  (/\b(the|of|and|or|in|on|to|for|with|a|an|by|from|into|towards)$/i.test(label) ||
+    (/^(how|what|why|when|where|which|do|does|is|are|can)\b/i.test(label) && /\?$/.test(next)));
+
+/**
  * Finds a textbook's section headings ("7.2.1 Fission") to offer as topics.
  */
 export const findTopics = (text: string): string[] => {
@@ -72,13 +81,6 @@ export const findTopics = (text: string): string[] => {
     }
     return cleanedWords.join(" ").slice(0, 200).trim();
   };
-  // A heading that wraps ("3.4.5 Extracting Metals towards the Top of the" / "Activity Series")
-  // continues on the next line when it ends on a small word or the next line closes a question.
-  const continuation = (label: string, next: string | undefined) =>
-    !!next && next.length <= 60 && !/^\d/.test(next) && /^[A-Z]/.test(next) && !/[.?!]$/.test(label) &&
-    (/\b(the|of|and|or|in|on|to|for|with|a|an|by|from|into|towards)$/i.test(label) ||
-      (/^(how|what|why|when|where|which|do|does|is|are|can)\b/i.test(label) && /\?$/.test(next)));
-
   const parseHeadings = (allowUndotted: boolean) => lines.flatMap((line, index) => {
     const match = line.match(/^(?:chapter\s+)?(\d+(?:\.\d+)*)(?:[.)])?\s+(.+)$/i);
     if (
@@ -91,7 +93,7 @@ export const findTopics = (text: string): string[] => {
     ) return [];
     const marker = match[1];
     let label = cleanHeading(match[2]);
-    if (continuation(label, lines[index + 1])) label = `${label} ${lines[index + 1]}`;
+    if (headingContinues(label, lines[index + 1])) label = `${label} ${lines[index + 1]}`;
     if (
       // Headings start with a capital or a term like "pH" ("3.10 mL of a solution..." is a measurement).
       !/^([A-Z]|[a-z][A-Z])/.test(label) || /^(mL|mg|kg|cm|mm|km|kJ|mA|mV|kW|g|L|K)\b/.test(label) ||
@@ -119,14 +121,33 @@ export const findTopics = (text: string): string[] => {
   const isTitleCase = (line: string) => line.split(" ").every(
     (word) => minorWords.has(word.toLowerCase()) || /^[A-Z][A-Za-z'()-]*$/.test(word),
   );
+  // Recurring feature boxes ("Pause and Ponder", "Ready to Go Beyond") label asides, not topics.
+  const featureBox = /^(meet a scientist|pause and ponder|threads of curiosity|ready to go beyond|do you know|did you know|think and act|keep the curiosity alive|let us (?:reflect|recall)|happy exploring|more to know|be a scientist)\b/i;
+  const lineCounts = new Map<string, number>();
+  for (const line of lines) lineCounts.set(line.toLowerCase(), (lineCounts.get(line.toLowerCase()) || 0) + 1);
+  // A question printed as a heading ("Why is a kilogram used everywhere?") names the topic it answers.
+  const questionHeading = (line: string) =>
+    /^(why|how|what|which|when|where|is|are|can|do|does)\b/i.test(line) && /\?$/.test(line) && /^[A-Z]/.test(line) &&
+    line.split(" ").length >= 4 && line.split(" ").length <= 14 && (line.match(/\?/g) || []).length === 1;
   const fallbackHeadings: string[] = [];
-  for (const line of lines) {
+  for (let index = 0; index < lines.length; index += 1) {
+    let line = lines[index];
+    // A heading that wraps ("Threads of" / "Curiosity") is read as one line.
+    if (headingContinues(line, lines[index + 1])) {
+      line = `${line} ${lines[index + 1]}`;
+      index += 1;
+    }
     const wordCount = line.split(" ").length;
+    if (featureBox.test(line) || (lineCounts.get(line.toLowerCase()) || 0) > 1) continue;
     if (
-      wordCount < 2 || wordCount > 12 || /[.!?,;:]$/.test(line) || /\d/.test(line) ||
-      excludedLabel.test(line) || /\b(chapter|section|unit|lesson)\b/i.test(line)
+      !questionHeading(line) && (
+        wordCount < 2 || wordCount > 12 || /[.!?,;:]$/.test(line) || /\d/.test(line) ||
+        excludedLabel.test(line) || /\b(chapter|section|unit|lesson)\b/i.test(line) ||
+        // A line ending on a small word ("Meghnad Saha on an") is a fragment of a caption or sentence.
+        /\b(a|an|the|of|and|or|in|on|to|for|with|by|is|are)$/i.test(line) || !/^[A-Z]/.test(line) ||
+        (!(/[A-Z]/.test(line) && line === line.toUpperCase()) && !isTitleCase(line))
+      )
     ) continue;
-    if (!(/[A-Z]/.test(line) && line === line.toUpperCase()) && !isTitleCase(line)) continue;
     const heading = cleanHeading(line);
     if (!fallbackHeadings.some((item) => item.toLowerCase() === heading.toLowerCase()))
       fallbackHeadings.push(heading);
