@@ -3,6 +3,7 @@ import { PDFDocument, StandardFonts, rgb, type PDFFont, type PDFPage } from "pdf
 import type { GeneratedQuestion, GeneratedSection } from "./blueprint";
 import { toRomanNumeral } from "./text-cleaner";
 import { keywordMask } from "./keyword-highlight";
+import { assetUrl } from "./asset-url";
 
 export type AnswerKeyLine = { label: string; text: string; keywords?: string[] };
 
@@ -91,8 +92,8 @@ export async function createAnswerKeyPdf(
 ): Promise<Uint8Array> {
   const document = await PDFDocument.create();
   document.registerFontkit(fontkit);
-  const regular = await loadFont(document, "/fonts/LiberationSans-Regular.ttf", StandardFonts.Helvetica);
-  const bold = await loadFont(document, "/fonts/LiberationSans-Bold.ttf", StandardFonts.HelveticaBold);
+  const regular = await loadFont(document, assetUrl("fonts/LiberationSans-Regular.ttf"), StandardFonts.Helvetica);
+  const bold = await loadFont(document, assetUrl("fonts/LiberationSans-Bold.ttf"), StandardFonts.HelveticaBold);
   const [pageWidth, pageHeight] = [595.28, 841.89];
   const margin = 48;
   const width = pageWidth - margin * 2;

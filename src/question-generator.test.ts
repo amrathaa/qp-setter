@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { draftQuestionSections, isCaseBasedSection, isMcqSection } from "./question-generator";
+import { draftQuestionSections, isCaseBasedSection, isMcqSection, levelForQuestion } from "./question-generator";
 import { generatePatternGeneralInstructions } from "./text-cleaner";
 
 const textbook = `1.1 Photosynthesis
@@ -62,7 +62,7 @@ describe("drafting questions", () => {
   it("asks which statement is about a topic when the text is too short for blanks, with no second right answer", () => {
     const [section] = draft([{ count: 1, marks: 1 }]);
     const question = section.questions[0];
-    expect(question.text).toMatch(/Which of the following statements is about Photosynthesis\?/);
+    expect(question.text).toMatch(/statement.*Photosynthesis/);
     expect(photosynthesisSection).toContain(question.answer);
     const wrong = question.options!.filter((option) => option !== question.answer);
     for (const option of wrong) expect(photosynthesisSection).not.toContain(option);
@@ -91,6 +91,30 @@ describe("drafting questions", () => {
     });
     const asked = sections.flatMap((section) => section.questions).map((q) => topics.find((topic) => q.text.includes(topic)));
     expect(asked).toEqual([...topics, ...topics]);
+  });
+
+  it("words neighbouring questions differently", () => {
+    const opening = (text: string) => text.replace(/^\d+\.\s*/, "").split(/\s+/).slice(0, 4).join(" ");
+    for (const difficulty of ["Easy", "Moderate", "Advanced", "Application"]) {
+      for (const marks of [1, 2, 3]) {
+        const [section] = draftQuestionSections({
+          textbookText: textbook,
+          selectedTopics: ["1.1 Photosynthesis", "1.2 Respiration"],
+          difficulty,
+          patternSections: [{ count: 3, marks, mcq: false }],
+        });
+        const openings = section.questions.map((q) => opening(q.text));
+        for (let i = 1; i < openings.length; i += 1) expect(openings[i]).not.toBe(openings[i - 1]);
+      }
+    }
+  });
+
+  it("spreads a Mixed paper evenly across all four levels", () => {
+    const levels = Array.from({ length: 12 }, (_, i) => levelForQuestion("Mixed", i));
+    for (const level of ["Easy", "Moderate", "Advanced", "Application"]) {
+      expect(levels.filter((l) => l === level)).toHaveLength(3);
+    }
+    expect(levelForQuestion("Advanced", 5)).toBe("Advanced");
   });
 
   it("numbers questions 1..N across sections", () => {
