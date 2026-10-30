@@ -260,6 +260,45 @@ function keyTermVocabulary(sentences: string[]): Map<string, KeyTerm> {
 const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 /**
+ * For textbooks too short for fill-in-the-blank MCQs: "Which statement is about <topic>?", with the correct
+ * statement from the topic's own section and the others from other sections that share no key words with the
+ * topic or the correct statement, so none of them can also be right. Without the topic's section it gives up.
+ */
+function buildStatementMcq(
+  topic: string,
+  sourceSentence: string,
+  ownSentences: string[],
+  allSentences: string[],
+  seed: number,
+  usedSentences: Set<string>,
+) {
+  if (ownSentences.length === 0) return null;
+  const readable = (sentence: string) => sentence.length >= 25 && sentence.length <= 200;
+  const topicWords = [...contentWords(topic)];
+  const mentionsTopic = (sentence: string) => topicWords.some((word) => contentWords(sentence).has(word));
+  const own = new Set(ownSentences);
+  const correct = [sourceSentence, ...ownSentences, ...allSentences.filter(mentionsTopic)]
+    .find((sentence) => sentence && readable(sentence) && (own.has(sentence) || mentionsTopic(sentence)) && !usedSentences.has(sentence));
+  if (!correct) return null;
+  const correctWords = contentWords(correct);
+  const others = allSentences.filter((sentence) =>
+    readable(sentence) &&
+    sentence !== correct &&
+    !own.has(sentence) &&
+    !mentionsTopic(sentence) &&
+    ![...contentWords(sentence)].some((word) => correctWords.has(word)));
+  if (others.length < 3) return null;
+  const distractors: string[] = [];
+  for (let offset = 0; offset < others.length && distractors.length < 3; offset += 1) {
+    const candidate = others[(seed * 3 + offset) % others.length];
+    if (!distractors.includes(candidate)) distractors.push(candidate);
+  }
+  const options = [correct, ...distractors];
+  const shift = seed % 4;
+  return { answer: correct, options: [...options.slice(shift), ...options.slice(0, shift)] };
+}
+
+/**
  * Turns a textbook sentence into a fill-in-the-blank MCQ whose options are all chapter key terms.
  */
 function buildClozeMcq(sentence: string, allSentences: string[], seed: number) {
@@ -322,7 +361,10 @@ export function generateSingleQuestion(
   textbookText = "",
   mcq = marks === 1,
 ): GeneratedQuestion {
-  const question = draftQuestion(topicRaw, sourceSentenceRaw, marks, difficulty, questionIndex, allSentences, usedSentences, mcq);
+  const question = draftQuestion(
+    topicRaw, sourceSentenceRaw, marks, difficulty, questionIndex, allSentences, usedSentences, mcq,
+    mcq ? (topicSectionSentences(textbookText, topicRaw).length ? topicSectionSentences(textbookText, topicRaw) : headingSectionSentences(textbookText, topicRaw)) : [],
+  );
   if (question.options) return question;
   // Written questions get a model answer taken from the textbook, with its key terms.
   const source = sourceSentenceRaw.trim();
@@ -607,6 +649,24 @@ export function topicSectionSentences(textbookText: string, topicRaw: string): s
     .flatMap((section) => section.sentences);
 }
 
+const looksLikeHeading = (line: string) => line.length > 0 && line.length <= 60 && /^[A-Z0-9]/.test(line) && !/[.?!:,;]$/.test(line);
+
+/**
+ * The sentences under an unnumbered heading ("Photosynthesis" on a line of its own), up to the next heading.
+ */
+function headingSectionSentences(textbookText: string, topicRaw: string): string[] {
+  const heading = cleanTopicName(topicRaw).toLowerCase();
+  const lines = textbookText.split(/\r?\n/).map((line) => line.trim());
+  const start = lines.findIndex((line) => cleanTopicName(line).toLowerCase() === heading);
+  if (start < 0) return [];
+  const body: string[] = [];
+  for (const line of lines.slice(start + 1)) {
+    if (looksLikeHeading(line)) break;
+    body.push(line);
+  }
+  return extractCleanSentences(body.join("\n"));
+}
+
 function draftQuestion(
   topicRaw: string,
   sourceSentenceRaw: string,
@@ -616,6 +676,8 @@ function draftQuestion(
   allSentences: string[],
   usedSentences: Set<string> = new Set(),
   mcq = marks === 1,
+  // Sentences under the topic's own heading, for MCQs that pick the statement about the topic.
+  ownSentences: string[] = [],
 ): GeneratedQuestion {
   const topic = topicForSentence(topicRaw);
   const sentence = sourceSentenceRaw
@@ -647,7 +709,16 @@ function draftQuestion(
             : "Choose the correct option to complete the statement:";
       return { text: `${lead} ${cloze.stem}`, marks, options: cloze.options, answer: cloze.answer };
     }
-    // Too little textbook text to build options from: fall back to a true/false style choice.
+    // Too few key terms for a blank: ask which statement is about the topic instead.
+    const statement = buildStatementMcq(topic, sourceSentenceRaw, ownSentences, allSentences, questionIndex, usedSentences);
+    if (statement) {
+      usedSentences.add(statement.answer);
+      const ask = difficulty === "Advanced" || difficulty === "Application"
+        ? `Which of the following statements correctly describes ${topic}?`
+        : `Which of the following statements is about ${topic}?`;
+      return { text: ask, marks, options: statement.options, answer: statement.answer };
+    }
+    // Too little textbook text even for that: fall back to a true/false style choice.
     return {
       text: `State whether the following statement about ${topic} is true or false: ${sentence.replace(/[.]$/, "")}.`,
       marks,
@@ -989,15 +1060,16 @@ export function draftQuestionSections(
     const questions: GeneratedQuestion[] = [];
     for (let qIndex = 0; qIndex < section.count; qIndex += 1) {
       // Try the next topic whenever a question would repeat one already in the paper.
+      // The paper-wide question count alone picks the topic, so consecutive questions move one topic on.
       let sentence = "";
       let q: GeneratedQuestion | null = null;
       for (let attempt = 0; attempt < topics.length; attempt += 1) {
-        const topic = topics[(globalQuestionCounter + qIndex + attempt) % topics.length];
+        const topic = topics[(globalQuestionCounter + attempt) % topics.length];
         sentence = getSourceSentence(topic, globalQuestionCounter + qIndex);
         // A case-based section looks through the other topics for a usable passage before giving up.
         let caseQuestion: GeneratedQuestion | null = null;
         for (let offset = 0; isCaseBasedSection(section) && !caseQuestion && offset < topics.length; offset += 1) {
-          const caseTopic = topics[(globalQuestionCounter + qIndex + attempt + offset) % topics.length];
+          const caseTopic = topics[(globalQuestionCounter + attempt + offset) % topics.length];
           caseQuestion = generateCaseQuestion(caseTopic, textbookText, section.marks, difficulty, globalQuestionCounter + qIndex + attempt, usedSentences);
         }
         q = caseQuestion || generateSingleQuestion(
