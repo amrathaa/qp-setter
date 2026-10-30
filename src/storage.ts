@@ -1,4 +1,4 @@
-import type { GeneratedQuestion, GeneratedSection } from "./blueprint";
+import type { GeneratedSection } from "./blueprint";
 
 export interface StoredPaper {
   id: string;
@@ -16,22 +16,7 @@ export interface StoredPaper {
   hasPdf?: boolean;
 }
 
-export interface StoredBankQuestion {
-  id: string;
-  text: string;
-  marks: number;
-  topic?: string;
-  difficulty?: string;
-  options?: string[];
-  alternative?: string;
-  answer?: string;
-  parts?: GeneratedQuestion["parts"];
-  dateAdded: string;
-  paperTitle?: string;
-}
-
 const PAPERS_KEY = "qp_setter_recent_papers";
-const BANK_KEY = "qp_setter_question_bank";
 const PROFILE_KEY = "qp_setter_profile";
 
 export interface TeacherProfile {
@@ -45,6 +30,26 @@ export function loadProfile(): TeacherProfile {
     return { name: String(parsed.name || ""), department: String(parsed.department || "") };
   } catch {
     return { name: "", department: "" };
+  }
+}
+
+const API_KEY_KEY = "qp_setter_anthropic_key";
+
+/** The teacher's own Anthropic API key, kept only in this browser. */
+export function loadApiKey(): string {
+  try {
+    return localStorage.getItem(API_KEY_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+
+export function saveApiKey(key: string): void {
+  try {
+    if (key) localStorage.setItem(API_KEY_KEY, key);
+    else localStorage.removeItem(API_KEY_KEY);
+  } catch {
+    // the key is then only kept for this visit
   }
 }
 
@@ -70,21 +75,20 @@ export function loadRecentPapers(): StoredPaper[] {
 }
 
 /**
- * Saves a paper's details to localStorage and indexes its questions into the Question Bank.
+ * Saves a paper's details to localStorage. Returns false if the browser refused.
  * The PDF itself goes to IndexedDB (see savePaperPdf) because localStorage only holds about 5 MB.
  */
-export function saveRecentPaper(paper: StoredPaper): { paperSaved: boolean; bankSaved: boolean } {
-  const bankSaved = saveQuestionsToBank(paper.sections, paper.title, paper.difficulty);
+export function saveRecentPaper(paper: StoredPaper): boolean {
   const papers = loadRecentPapers();
   const updated = [paper, ...papers.filter((p) => p.id !== paper.id)];
   const kept = updated.slice(0, 30);
   for (const dropped of updated.slice(30)) void deletePaperPdf(dropped.id);
   try {
     localStorage.setItem(PAPERS_KEY, JSON.stringify(kept));
-    return { paperSaved: true, bankSaved };
+    return true;
   } catch (err) {
     console.error("Failed to save paper to localStorage:", err);
-    return { paperSaved: false, bankSaved };
+    return false;
   }
 }
 
@@ -102,29 +106,53 @@ export function deleteRecentPaper(id: string): StoredPaper[] {
   }
 }
 
-const PDF_DB = "qp_setter_files";
+const FILES_DB = "qp_setter_files";
 const PDF_STORE = "paper_pdfs";
+// Small values that must survive reloads but cannot go in localStorage, such as the sync file handle.
+const SETTINGS_STORE = "settings";
 
-const openPdfDb = () =>
+const openFilesDb = () =>
   new Promise<IDBDatabase>((resolve, reject) => {
-    const request = indexedDB.open(PDF_DB, 1);
-    request.onupgradeneeded = () => request.result.createObjectStore(PDF_STORE);
+    const request = indexedDB.open(FILES_DB, 4);
+    request.onupgradeneeded = () => {
+      for (const name of [PDF_STORE, SETTINGS_STORE]) {
+        if (!request.result.objectStoreNames.contains(name)) request.result.createObjectStore(name);
+      }
+      // The Question bank feature was removed; drop its stored questions so they stop using space.
+      if (request.result.objectStoreNames.contains("question_bank")) request.result.deleteObjectStore("question_bank");
+      try {
+        localStorage.removeItem("qp_setter_question_bank");
+        localStorage.removeItem("qp_setter_bank_last_export");
+      } catch {
+        // nothing to clean up
+      }
+    };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
   });
 
-const withPdfStore = async <T>(mode: IDBTransactionMode, action: (store: IDBObjectStore) => IDBRequest<T>) => {
-  const db = await openPdfDb();
+// Resolves once the transaction has committed, so a write refused for lack of space is reported.
+const withStore = async <T>(
+  storeName: string,
+  mode: IDBTransactionMode,
+  action: (store: IDBObjectStore) => IDBRequest<T>,
+) => {
+  const db = await openFilesDb();
   try {
     return await new Promise<T>((resolve, reject) => {
-      const request = action(db.transaction(PDF_STORE, mode).objectStore(PDF_STORE));
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(request.error);
+      const transaction = db.transaction(storeName, mode);
+      const request = action(transaction.objectStore(storeName));
+      transaction.oncomplete = () => resolve(request.result);
+      transaction.onerror = () => reject(transaction.error || request.error);
+      transaction.onabort = () => reject(transaction.error || request.error);
     });
   } finally {
     db.close();
   }
 };
+
+const withPdfStore = <T>(mode: IDBTransactionMode, action: (store: IDBObjectStore) => IDBRequest<T>) =>
+  withStore(PDF_STORE, mode, action);
 
 /**
  * Stores a generated paper PDF in IndexedDB. Returns false if the browser refused.
@@ -184,76 +212,15 @@ export async function migrateLegacyPaperPdfs(): Promise<StoredPaper[]> {
 }
 
 /**
- * Loads question bank items from localStorage.
+ * Asks the browser not to clear saved papers and questions when the disk runs low.
+ * Returns whether storage is protected; browsers may decide this on their own.
  */
-export function loadQuestionBank(): StoredBankQuestion[] {
+export async function requestPersistentStorage(): Promise<boolean> {
   try {
-    const raw = localStorage.getItem(BANK_KEY);
-    if (!raw) return getInitialQuestionBankSeed();
-    const items = JSON.parse(raw);
-    return Array.isArray(items) && items.length > 0 ? items : getInitialQuestionBankSeed();
+    if (!navigator.storage?.persist) return false;
+    return (await navigator.storage.persisted()) || (await navigator.storage.persist());
   } catch {
-    return getInitialQuestionBankSeed();
-  }
-}
-
-/**
- * Saves a list of generated questions to the question bank.
- */
-export function saveQuestionsToBank(
-  sections: GeneratedSection[],
-  paperTitle: string,
-  difficulty = "Moderate",
-): boolean {
-  try {
-    const currentBank = loadQuestionBank();
-    const newItems: StoredBankQuestion[] = [];
-
-    for (const section of sections) {
-      for (const q of section.questions) {
-        const cleanText = q.text.replace(/^\s*\d+[.)]\s*/, "").trim();
-        // Avoid duplicate text in bank
-        if (
-          !currentBank.some((b) => b.text.toLowerCase() === cleanText.toLowerCase()) &&
-          !newItems.some((b) => b.text.toLowerCase() === cleanText.toLowerCase())
-        ) {
-          newItems.push({
-            id: `q_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-            text: cleanText,
-            marks: q.marks || 1,
-            difficulty,
-            options: q.options,
-            alternative: typeof q.alternative === "string" ? q.alternative : q.alternative?.text,
-            answer: q.answer,
-            parts: q.parts,
-            dateAdded: new Date().toLocaleDateString(),
-            paperTitle,
-          });
-        }
-      }
-    }
-
-    if (newItems.length > 0) {
-      const updated = [...newItems, ...currentBank].slice(0, 500);
-      localStorage.setItem(BANK_KEY, JSON.stringify(updated));
-    }
-    return true;
-  } catch (err) {
-    console.error("Failed to update question bank:", err);
     return false;
-  }
-}
-
-/**
- * Delete a question from the bank.
- */
-export function deleteBankQuestion(id: string): StoredBankQuestion[] {
-  try {
-    const bank = loadQuestionBank().filter((q) => q.id !== id);
-    localStorage.setItem(BANK_KEY, JSON.stringify(bank));
-    return bank;
-  } catch {
-    return [];
   }
 }
 
@@ -269,44 +236,101 @@ export async function blobToBase64(blob: Blob): Promise<string> {
   });
 }
 
+export async function loadSetting<T>(key: string): Promise<T | undefined> {
+  try {
+    return await withStore<T | undefined>(SETTINGS_STORE, "readonly", (store) => store.get(key));
+  } catch {
+    return undefined;
+  }
+}
+
+export async function saveSetting(key: string, value: unknown): Promise<void> {
+  try {
+    if (value === undefined) await withStore(SETTINGS_STORE, "readwrite", (store) => store.delete(key));
+    else await withStore(SETTINGS_STORE, "readwrite", (store) => store.put(value, key));
+  } catch {
+    // the setting simply isn't remembered
+  }
+}
+
+type SyncPaper = StoredPaper & { pdfData?: string };
+
 /**
- * Initial seed questions so the Question Bank isn't empty on first run.
+ * Everything worth carrying to another computer: profile and Recent papers (with their PDFs).
  */
-function getInitialQuestionBankSeed(): StoredBankQuestion[] {
-  return [
-    {
-      id: "seed_1",
-      text: "Which of the following cellular organelles is primarily responsible for adenosine triphosphate (ATP) synthesis?",
-      marks: 1,
-      options: ["Ribosome", "Mitochondria", "Endoplasmic reticulum", "Golgi apparatus"],
-      difficulty: "Easy",
-      dateAdded: "2026-10-15",
-      paperTitle: "Biology Sample Assessment",
-    },
-    {
-      id: "seed_2",
-      text: "Differentiate between endothermic and exothermic reactions with one balanced chemical equation for each.",
-      marks: 2,
-      difficulty: "Moderate",
-      dateAdded: "2026-10-16",
-      paperTitle: "Chemistry Mid-Term",
-    },
-    {
-      id: "seed_3",
-      text: "Explain Ohm's Law. Describe an experimental setup to verify the relationship between current and potential difference across a conductor.",
-      marks: 3,
-      difficulty: "Moderate",
-      dateAdded: "2026-10-18",
-      paperTitle: "Physics Annual Exam",
-    },
-    {
-      id: "seed_4",
-      text: "Explain the process of double fertilization in angiosperms. Discuss its biological significance and subsequent seed development.",
-      marks: 5,
-      alternative: "Describe the human digestive system with the aid of a labeled diagram. Detail the enzymatic digestion occurring in the stomach and small intestine.",
-      difficulty: "Advanced",
-      dateAdded: "2026-10-20",
-      paperTitle: "Biology Mock Exam",
-    },
-  ];
+export async function buildSyncFile(): Promise<string> {
+  const papers: SyncPaper[] = [];
+  for (const paper of loadRecentPapers()) {
+    const blob = paper.pdfBase64 ? null : await loadPaperPdf(paper.id);
+    papers.push({ ...paper, pdfData: paper.pdfBase64 || (blob ? await blobToBase64(blob) : undefined), pdfBase64: undefined });
+  }
+  return JSON.stringify({
+    app: "QP Setter",
+    kind: "sync",
+    version: 1,
+    savedAt: new Date().toISOString(),
+    profile: loadProfile(),
+    papers,
+  });
+}
+
+export interface SyncResult {
+  papersAdded: number;
+  profile: TeacherProfile;
+  papersSaved: boolean;
+}
+
+/**
+ * Merges a sync file into this browser. It only adds what is missing here; nothing is deleted.
+ * Returns null if the file is not a QP Setter sync file.
+ */
+export async function applySyncFile(fileText: string): Promise<SyncResult | null> {
+  let parsed: { kind?: unknown; papers?: unknown; profile?: Partial<TeacherProfile> };
+  try {
+    parsed = JSON.parse(fileText);
+  } catch {
+    return null;
+  }
+  if (parsed?.kind !== "sync" || !Array.isArray(parsed.papers)) return null;
+
+  const local = loadRecentPapers();
+  const localIds = new Set(local.map((paper) => paper.id));
+  const incoming = (parsed.papers as SyncPaper[]).filter(
+    (paper) => paper && typeof paper.id === "string" && Array.isArray(paper.sections) && !localIds.has(paper.id),
+  );
+  const added: StoredPaper[] = [];
+  for (const { pdfData, ...paper } of incoming) {
+    let hasPdf = false;
+    if (typeof pdfData === "string" && pdfData.startsWith("data:")) {
+      try {
+        hasPdf = await savePaperPdf(paper.id, await (await fetch(pdfData)).blob());
+      } catch {
+        hasPdf = false;
+      }
+    }
+    added.push({ ...paper, pdfBase64: undefined, hasPdf });
+  }
+  const merged = [...local, ...added].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  const kept = merged.slice(0, 30);
+  for (const dropped of merged.slice(30)) void deletePaperPdf(dropped.id);
+  let papersSaved = true;
+  try {
+    localStorage.setItem(PAPERS_KEY, JSON.stringify(kept));
+  } catch {
+    papersSaved = false;
+  }
+
+  // A profile set on this computer wins; an empty one is filled from the file.
+  const current = loadProfile();
+  const profile = {
+    name: current.name || String(parsed.profile?.name || ""),
+    department: current.department || String(parsed.profile?.department || ""),
+  };
+  saveProfile(profile);
+
+  return {
+    papersAdded: papersSaved ? added.filter((paper) => kept.includes(paper)).length : 0,
+    profile,
+    papersSaved,
+  };
 }
