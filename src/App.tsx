@@ -382,8 +382,8 @@ function App() {
       addTextbooks(Array.from(event.dataTransfer.files));
   };
 
-  const draftSourceKey = (level: string) =>
-    JSON.stringify([textbookText.length, textbookText.slice(0, 500), selectedTopics, patternSections, level]);
+  const draftSourceKey = (level: string, pattern = patternSections) =>
+    JSON.stringify([textbookText.length, textbookText.slice(0, 500), selectedTopics, pattern, level]);
 
   const redraft = (level = difficulty) => {
     draftHistory.record();
@@ -400,6 +400,40 @@ function App() {
 
   const confirmDiscardEdits = async (message: string, confirmLabel = "Redraft") =>
     !draftEdited || (await dialogs.confirm(message, confirmLabel));
+
+  // Loads a saved paper back into the review step, with its pattern, so it can be changed and generated again.
+  const openPaperForEditing = async (paper: StoredPaper) => {
+    if (
+      !(await confirmDiscardEdits(
+        `Open "${paper.title}" for editing? The questions you are working on now are replaced; Undo brings them back.`,
+        "Open paper",
+      ))
+    ) return;
+    const pattern = paper.sections.map((section) => {
+      const filled = section.questions.length > 0;
+      return {
+        label: section.label,
+        count: section.questions.length,
+        marks: section.questions[0]?.marks || 1,
+        mcq: filled && section.questions.every((q) => Boolean(q.options?.length)),
+        caseBased: filled && section.questions.every((q) => q.kind === "case"),
+      };
+    });
+    patternHistory.record();
+    setPatternSections(pattern);
+    setDuration(paper.duration);
+    draftHistory.record();
+    setDifficulty(paper.difficulty);
+    setDraftedSections(renumberSections(paper.sections));
+    setDraftEdited(true);
+    // Marks the draft as matching the current inputs, so opening the review step does not offer to redraft it.
+    setDraftSource(draftSourceKey(paper.difficulty, pattern));
+    setUndoNotice("");
+    setGenerated(false);
+    showGeneratedPdf(null);
+    setActiveNav("New paper");
+    setActiveStep(3);
+  };
 
   // Entering the review step keeps the current draft (and any edits) unless its inputs changed.
   const refreshDraftOnEnter = async () => {
@@ -907,7 +941,7 @@ function App() {
                 <div>
                   <p className="eyebrow">RECENT PAPERS <span className="line" /></p>
                   <h1>Archived question <em>papers.</em></h1>
-                  <p className="intro-copy">View, re-download, or inspect papers generated in this workspace.</p>
+                  <p className="intro-copy">Re-download a paper, or open it to change questions and generate it again.</p>
                 </div>
               </section>
 
@@ -955,6 +989,9 @@ function App() {
                             Download PDF
                           </button>
                         )}
+                        <button className="back-button" onClick={() => void openPaperForEditing(paper)}>
+                          Open and edit
+                        </button>
                         <button
                           className="q-delete-btn"
                           onClick={() => {
