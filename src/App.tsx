@@ -20,20 +20,25 @@ import {
   loadRecentPapers,
   saveRecentPaper,
   deleteRecentPaper,
-  loadQuestionBank,
-  deleteBankQuestion,
+  requestPersistentStorage,
   savePaperPdf,
   loadPaperPdf,
   migrateLegacyPaperPdfs,
   loadProfile,
   saveProfile,
+  loadApiKey,
+  saveApiKey,
+  type TeacherProfile,
   type StoredPaper,
-  type StoredBankQuestion,
 } from "./storage";
 import { joinPdfPages, cleanBrokenKerningWords } from "./text-cleaner";
 import { findTopics } from "./topic-finder";
 import { ModelAnswerEditor } from "./model-answer-editor";
 import { useUndoHistory, useUndoShortcuts } from "./use-undo-history";
+import { ProfileDialog } from "./dialogs";
+import { useDialogs } from "./use-dialogs";
+import { AiImprovePanel } from "./ai-improve-panel";
+import { SyncView } from "./sync-view";
 import "./App.css";
 
 // The PDF and Word libraries are large, so they load only when a file is read or a paper is built.
@@ -58,6 +63,9 @@ function renumberSections(sections: GeneratedSection[]): GeneratedSection[] {
     }),
   }));
 }
+
+// The blueprint quality suite is a developer tool, shown only with ?debug=1.
+const isDebugMode = new URLSearchParams(window.location.search).get("debug") === "1";
 
 const steps = [
   { number: "01", label: "Textbook", detail: "Add your source" },
@@ -149,9 +157,6 @@ function App() {
 
   // Storage and Help
   const [recentPapers, setRecentPapers] = useState<StoredPaper[]>(() => loadRecentPapers());
-  const [bankQuestions, setBankQuestions] = useState<StoredBankQuestion[]>(() => loadQuestionBank());
-  const [bankSearch, setBankSearch] = useState("");
-  const [bankMarkFilter, setBankMarkFilter] = useState<number | null>(null);
   const [isHelpOpen, setIsHelpOpen] = useState(false);
   const [testResults, setTestResults] = useState<any[] | null>(null);
   const [isRunningTests, setIsRunningTests] = useState(false);
@@ -163,15 +168,18 @@ function App() {
     .map((word) => word[0].toUpperCase())
     .join("") || "?";
 
-  const editProfile = () => {
-    const name = window.prompt("Your name", profile.name);
-    if (name === null) return;
-    const department = window.prompt("Your department (e.g. Science department)", profile.department);
-    if (department === null) return;
-    const updated = { name: name.trim(), department: department.trim() };
+  const [isProfileOpen, setIsProfileOpen] = useState(false);
+  const saveProfileEdits = (updated: TeacherProfile) => {
     setProfile(updated);
     saveProfile(updated);
+    setIsProfileOpen(false);
   };
+  const dialogs = useDialogs();
+
+  // AI question writing (optional; uses the teacher's own Anthropic API key)
+  const [apiKey, setApiKey] = useState(() => loadApiKey());
+  const [aiStatus, setAiStatus] = useState({ busy: false, message: "", isError: false });
+  const latestDraft = useRef<GeneratedSection[] | null>(null);
 
   // In-app preview URL, released when a newer PDF replaces it
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
@@ -203,6 +211,7 @@ function App() {
   // Move PDFs saved inline by older versions out of localStorage so it has room again.
   useEffect(() => {
     void migrateLegacyPaperPdfs().then(setRecentPapers);
+    void requestPersistentStorage();
   }, []);
 
   // Derived standard template config in sync with total marks and duration
@@ -373,35 +382,88 @@ function App() {
 
   const redraft = (level = difficulty) => {
     draftHistory.record();
-    setDraftedSections(
-      draftQuestionSections({
-        textbookText,
-        selectedTopics,
-        difficulty: level,
-        patternSections,
-      }),
-    );
+    const sections = draftQuestionSections({
+      textbookText,
+      selectedTopics,
+      difficulty: level,
+      patternSections,
+    });
+    setDraftedSections(sections);
     setDraftSource(draftSourceKey(level));
     setDraftEdited(false);
   };
 
-  const confirmDiscardEdits = (message: string) => !draftEdited || window.confirm(message);
+  useEffect(() => {
+    latestDraft.current = draftedSections;
+  }, [draftedSections]);
+
+  const updateApiKey = (key: string) => {
+    setApiKey(key);
+    saveApiKey(key);
+  };
+
+  // Rewrites the whole draft with Claude; the result is one Undo step.
+  const improveWithAi = async () => {
+    const startingDraft = draftedSections;
+    setAiStatus({ busy: true, message: "Claude is rewriting your questions. This usually takes a minute or two…", isError: false });
+    try {
+      const { improveQuestionsWithAI } = await import("./ai-questions");
+      const result = await improveQuestionsWithAI({
+        apiKey,
+        sections: startingDraft,
+        textbookText,
+        topics: selectedTopics,
+        difficulty,
+      });
+      if (
+        latestDraft.current !== startingDraft &&
+        !(await dialogs.confirm(
+          "You changed the questions while the AI was working. Replace them with the AI's version? Undo brings your changes back.",
+          "Use AI version",
+        ))
+      ) {
+        setAiStatus({ busy: false, message: "The AI's version was not used.", isError: false });
+        return;
+      }
+      draftHistory.record();
+      setUndoNotice("");
+      setDraftEdited(true);
+      setDraftedSections(renumberSections(result.sections));
+      setAiStatus({
+        busy: false,
+        message:
+          `Improved ${result.improved} question${result.improved === 1 ? "" : "s"}.` +
+          (result.kept ? ` ${result.kept} kept as drafted because the AI's version didn't fit the paper.` : "") +
+          " Check them below, and use Undo to go back.",
+        isError: false,
+      });
+    } catch (error) {
+      setAiStatus({
+        busy: false,
+        message: error instanceof Error ? error.message : "The AI could not improve the questions.",
+        isError: true,
+      });
+    }
+  };
+
+  const confirmDiscardEdits = async (message: string, confirmLabel = "Redraft") =>
+    !draftEdited || (await dialogs.confirm(message, confirmLabel));
 
   // Entering the review step keeps the current draft (and any edits) unless its inputs changed.
-  const refreshDraftOnEnter = () => {
+  const refreshDraftOnEnter = async () => {
     if (draftSourceKey(difficulty) === draftSource) return;
-    if (!confirmDiscardEdits("Your textbook, topics or pattern changed since these questions were drafted. Redraft them now? You can bring your edits back with Undo on the review screen.")) return;
+    if (!(await confirmDiscardEdits("Your textbook, topics or pattern changed since these questions were drafted. Redraft them now? You can bring your edits back with Undo on the review screen."))) return;
     redraft();
   };
 
   const goToStep = (index: number) => {
-    if (index === 3) refreshDraftOnEnter();
+    if (index === 3) void refreshDraftOnEnter();
     setActiveStep(index);
   };
 
   const nextStep = () => {
     const next = Math.min(activeStep + 1, steps.length - 1);
-    if (next === 3) refreshDraftOnEnter();
+    if (next === 3) void refreshDraftOnEnter();
     setActiveStep(next);
   };
 
@@ -755,7 +817,7 @@ function App() {
       showGeneratedPdf(blob);
       setGenerated(true);
 
-      // Save to Recent Papers and Question Bank
+      // Save to Recent Papers
       const paperId = `paper_${Date.now()}`;
       const pdfSaved = await savePaperPdf(paperId, blob);
       const paperRecord: StoredPaper = {
@@ -771,20 +833,18 @@ function App() {
         sections: draftedSections,
         hasPdf: pdfSaved,
       };
-      const { paperSaved, bankSaved } = saveRecentPaper(paperRecord);
+      const paperSaved = saveRecentPaper(paperRecord);
       const storageProblems = [
         !paperSaved && "Recent papers",
         !pdfSaved && "the saved PDF copy",
-        !bankSaved && "the Question bank",
       ].filter(Boolean);
       if (storageProblems.length) {
         setWarnings((current) => [
           ...current,
-          `Your paper was generated, but the browser's storage is full, so ${storageProblems.join(", ")} could not be updated. Download the PDF now, and delete old papers or bank questions to free space.`,
+          `Your paper was generated, but the browser's storage is full, so ${storageProblems.join(", ")} could not be updated. Download the PDF now, and delete old papers to free space.`,
         ]);
       }
       setRecentPapers(loadRecentPapers());
-      setBankQuestions(loadQuestionBank());
     } catch {
       setWarnings((current) => [
         ...current,
@@ -817,18 +877,6 @@ function App() {
     );
   }, [extractedTopics, topicSearch]);
 
-  // Filtered bank questions for Question Bank view
-  const filteredBankQuestions = useMemo(() => {
-    return bankQuestions.filter((q) => {
-      const matchesSearch =
-        !bankSearch.trim() ||
-        q.text.toLowerCase().includes(bankSearch.toLowerCase()) ||
-        q.paperTitle?.toLowerCase().includes(bankSearch.toLowerCase());
-      const matchesMarks = bankMarkFilter === null || q.marks === bankMarkFilter;
-      return matchesSearch && matchesMarks;
-    });
-  }, [bankQuestions, bankSearch, bankMarkFilter]);
-
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -845,29 +893,21 @@ function App() {
             <span className="nav-icon">＋</span>New paper
           </button>
           <button
-            className={`nav-item ${activeNav === "Question bank" ? "active" : ""}`}
-            onClick={() => setActiveNav("Question bank")}
-          >
-            <span className="nav-icon">▦</span>Question bank{" "}
-            <span className="count">{bankQuestions.length}</span>
-          </button>
-          <button
             className={`nav-item ${activeNav === "Recent papers" ? "active" : ""}`}
             onClick={() => setActiveNav("Recent papers")}
           >
             <span className="nav-icon">◷</span>Recent papers{" "}
             {recentPapers.length > 0 && <span className="count">{recentPapers.length}</span>}
           </button>
+          <button
+            className={`nav-item ${activeNav === "Sync" ? "active" : ""}`}
+            onClick={() => setActiveNav("Sync")}
+          >
+            <span className="nav-icon">⇅</span>Sync
+          </button>
         </nav>
         <div className="sidebar-bottom">
-          <div className="bank-note">
-            <span className="spark">✦</span>
-            <div>
-              <strong>Your bank is growing</strong>
-              <small>{bankQuestions.length} unique questions saved</small>
-            </div>
-          </div>
-          <button className="profile" onClick={editProfile} title="Edit your name and department">
+          <button className="profile" onClick={() => setIsProfileOpen(true)} title="Edit your name and department">
             <span className="avatar">{profileInitials}</span>
             <span>
               <strong>{profile.name || "Add your name"}</strong>
@@ -885,107 +925,25 @@ function App() {
             <strong>
               {activeNav === "New paper"
                 ? "New question paper"
-                : activeNav === "Question bank"
-                  ? "Question Bank"
+                : activeNav === "Sync"
+                  ? "Sync"
                   : "Recent Papers"}
             </strong>
           </div>
           <button className="help" onClick={() => setIsHelpOpen(true)}>
-            ? <span>Help &amp; Quality QA</span>
+            ? <span>Help</span>
           </button>
         </header>
 
         <div className="content-wrap">
-          {/* QUESTION BANK VIEW */}
-          {activeNav === "Question bank" && (
-            <div className="bank-container">
-              <section className="page-intro">
-                <div>
-                  <p className="eyebrow">QUESTION BANK <span className="line" /></p>
-                  <h1>Browse your <em>curated questions.</em></h1>
-                  <p className="intro-copy">Every question you generate or review is saved here for reuse.</p>
-                </div>
-              </section>
-
-              <div className="bank-controls">
-                <input
-                  type="text"
-                  className="bank-search"
-                  placeholder="Search questions by text or source exam…"
-                  value={bankSearch}
-                  onChange={(e) => setBankSearch(e.target.value)}
-                />
-                <div className="filter-pills">
-                  <button
-                    className={`filter-pill ${bankMarkFilter === null ? "active" : ""}`}
-                    onClick={() => setBankMarkFilter(null)}
-                  >
-                    All Marks
-                  </button>
-                  {[1, 2, 3, 5].map((m) => (
-                    <button
-                      key={m}
-                      className={`filter-pill ${bankMarkFilter === m ? "active" : ""}`}
-                      onClick={() => setBankMarkFilter(m)}
-                    >
-                      {m} Mark{m > 1 ? "s" : ""}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {filteredBankQuestions.length === 0 ? (
-                <div className="empty-state">
-                  <span>▦</span>
-                  <h3>No questions match your filter</h3>
-                  <p>Generate papers to populate your question bank or adjust your search.</p>
-                </div>
-              ) : (
-                <div className="bank-grid">
-                  {filteredBankQuestions.map((q) => (
-                    <div key={q.id} className="bank-card">
-                      <div className="bank-card-meta">
-                        <span className="marks-badge">{q.marks} Mark{q.marks > 1 ? "s" : ""}</span>
-                        <span>{q.dateAdded}</span>
-                      </div>
-                      <p className="bank-card-text">{q.text}</p>
-                      {q.options && q.options.length > 0 && (
-                        <div className="bank-card-options">
-                          {q.options.map((opt, i) => (
-                            <span key={i}>{String.fromCharCode(97 + i)}) {opt}</span>
-                          ))}
-                        </div>
-                      )}
-                      {q.alternative && (
-                        <div className="bank-card-options" style={{ borderColor: "#d9a566" }}>
-                          <span style={{ color: "#9c6827" }}>OR: {q.alternative}</span>
-                        </div>
-                      )}
-                      <div className="bank-card-footer">
-                        <small style={{ color: "#8a968f" }}>{q.paperTitle || "Saved question"}</small>
-                        <div style={{ display: "flex", gap: "6px" }}>
-                          <button
-                            className="q-action-btn"
-                            onClick={() => {
-                              navigator.clipboard.writeText(q.text);
-                              alert("Question copied to clipboard!");
-                            }}
-                          >
-                            Copy
-                          </button>
-                          <button
-                            className="q-delete-btn"
-                            onClick={() => setBankQuestions(deleteBankQuestion(q.id))}
-                          >
-                            ×
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
+          {/* SYNC VIEW */}
+          {activeNav === "Sync" && (
+            <SyncView
+              onLoaded={(result) => {
+                setRecentPapers(loadRecentPapers());
+                setProfile(result.profile);
+              }}
+            />
           )}
 
           {/* RECENT PAPERS VIEW */}
@@ -1037,7 +995,7 @@ function App() {
                                 blob = await loadPaperPdf(paper.id);
                               }
                               if (blob) downloadPdf(blob);
-                              else window.alert("The saved PDF for this paper is no longer available in this browser.");
+                              else void dialogs.inform("The saved PDF for this paper is no longer available in this browser.");
                             }}
                           >
                             Download PDF
@@ -1287,7 +1245,7 @@ function App() {
                                           background: "#d99552",
                                           borderColor: "#d99552",
                                           color: "white",
-                                          fontSize: "12px",
+                                          fontSize: "14px",
                                         }
                                       : undefined
                                   }
@@ -1646,9 +1604,9 @@ function App() {
                           <button
                             key={level}
                             className={`difficulty ${level.toLowerCase()} ${difficulty === level ? "active-diff" : ""}`}
-                            onClick={() => {
+                            onClick={async () => {
                               if (level === difficulty) return;
-                              if (!confirmDiscardEdits(`Switching to ${level} redrafts all questions. You can bring your edits back with Undo. Continue?`)) return;
+                              if (!(await confirmDiscardEdits(`Switching to ${level} redrafts all questions. You can bring your edits back with Undo.`, `Switch to ${level}`))) return;
                               setDifficulty(level);
                               redraft(level);
                             }}
@@ -1659,6 +1617,14 @@ function App() {
                         ),
                       )}
                     </div>
+
+                    <AiImprovePanel
+                      apiKey={apiKey}
+                      onApiKeyChange={updateApiKey}
+                      onImprove={() => void improveWithAi()}
+                      status={aiStatus}
+                      hasTextbook={Boolean(textbookText.trim())}
+                    />
 
                     {/* QUESTION REVIEW & EDITOR SECTION */}
                     <div className="question-review-wrap">
@@ -1681,8 +1647,8 @@ function App() {
                           </button>
                           <button
                             className="q-action-btn"
-                            onClick={() => {
-                              if (!confirmDiscardEdits("Redraft all questions? You can bring your edits back with Undo.")) return;
+                            onClick={async () => {
+                              if (!(await confirmDiscardEdits("Redraft all questions? You can bring your edits back with Undo."))) return;
                               redraft();
                             }}
                           >
@@ -1883,6 +1849,14 @@ function App() {
                       </button>
                     </div>
 
+                    {warnings.length > 0 && (
+                      <ul className="generation-warnings">
+                        {warnings.map((warning) => (
+                          <li key={warning}>{warning}</li>
+                        ))}
+                      </ul>
+                    )}
+
                     {/* IN-APP PDF PREVIEW */}
                     {previewUrl && (
                       <div className="pdf-viewer-container">
@@ -1920,29 +1894,34 @@ function App() {
         <div className="modal-overlay" onClick={() => setIsHelpOpen(false)}>
           <div className="modal-content" onClick={(e) => e.stopPropagation()}>
             <div className="modal-header">
-              <h2>Help &amp; Quality QA Runner</h2>
+              <h2>Help</h2>
               <button className="modal-close" onClick={() => setIsHelpOpen(false)}>
                 ×
               </button>
             </div>
             <div>
-              <p style={{ fontSize: "12px", color: "#56675e", lineHeight: 1.6 }}>
+              <p className="help-lead">
                 <strong>QP Setter</strong> builds question papers matching your institution's voice and typography.
               </p>
-              <ul style={{ fontSize: "11px", color: "#677970", marginTop: "8px", paddingLeft: "18px" }}>
+              <ul className="help-list">
                 <li>Step 1: Upload your course material (PDF or DOCX) to extract topics.</li>
                 <li>Step 2: Set your question pattern (sections, counts, and marks).</li>
                 <li>Step 3: Upload a previous blueprint PDF or use our Standard Institutional Header.</li>
-                <li>Step 4: Review questions, customize prompts, and download or preview your paper.</li>
+                <li>
+                  Step 4: Review and edit the questions, optionally improve them with AI using your own Anthropic API
+                  key, then generate the paper and its answer key.
+                </li>
+                <li>Sync between computers: keep one sync file in your OneDrive, Google Drive or Dropbox folder.</li>
               </ul>
             </div>
 
+            {isDebugMode && (
             <div style={{ marginTop: "16px", borderTop: "1px solid #e2e8e0", paddingTop: "14px" }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                 <strong>Blueprint Quality Test Suite</strong>
                 <button
                   className="next-button"
-                  style={{ padding: "8px 12px", fontSize: "10px" }}
+                  style={{ padding: "8px 12px", fontSize: "12px" }}
                   onClick={runTestFixtures}
                   disabled={isRunningTests}
                 >
@@ -1983,9 +1962,15 @@ function App() {
                 </table>
               )}
             </div>
+            )}
           </div>
         </div>
       )}
+
+      {isProfileOpen && (
+        <ProfileDialog profile={profile} onSave={saveProfileEdits} onClose={() => setIsProfileOpen(false)} />
+      )}
+      {dialogs.dialog}
     </div>
   );
 }
