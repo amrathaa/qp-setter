@@ -6,12 +6,16 @@ export interface QuestionGeneratorOptions {
   textbookText: string;
   selectedTopics: string[];
   difficulty: "Easy" | "Moderate" | "Advanced" | "Application" | string;
-  patternSections: Array<{ count: number; marks: number; label?: string; caseBased?: boolean }>;
+  patternSections: Array<{ count: number; marks: number; label?: string; caseBased?: boolean; mcq?: boolean }>;
 }
 
 /** CBSE's source/case-based items carry 4 marks, so 4-mark sections default to case-based. */
 export const isCaseBasedSection = (section: { marks: number; caseBased?: boolean }) =>
   section.caseBased ?? section.marks === 4;
+
+/** 1-mark sections default to four-option MCQs; the teacher can turn that off, or on for any other section. */
+export const isMcqSection = (section: { marks: number; caseBased?: boolean; mcq?: boolean }) =>
+  !isCaseBasedSection(section) && (section.mcq ?? section.marks === 1);
 
 // Sentences that only make sense inside the textbook's own narration ("Let us...", "Can you think...").
 const narrationPattern = /\([a-d]\)|^(it|this|these|that|those|they|he|she|we|let|can|think|but|and|or|so|now|here|on the other hand|however|such|therefore|thus|hence|similarly|also|compare|observe|take|find|look|draw|discuss|try|note|see|place|collect|consider|imagine|arrange|for this|make sure|ensure|never|always|do not|now|add|put|mix|pour|heat|dip|stir|repeat|record|cover|balance|name|state|give|write|explain|define|list|identify|describe|mention|what|which|why|how)\b|\bto think of\b|\b(we|us|our|you|your|let's)\b|\b(classroom|next chapter|previous chapter|class\s+(?:ix|viii|x)|activity|activities|figure|fig\.)|\b(chapter|section|table)\s+\d|\b(following sections?|explained in detail|table above)\b/i;
@@ -316,8 +320,9 @@ export function generateSingleQuestion(
   usedSentences: Set<string> = new Set(),
   // The full textbook text, so topic-level answers can come from the topic's own section.
   textbookText = "",
+  mcq = marks === 1,
 ): GeneratedQuestion {
-  const question = draftQuestion(topicRaw, sourceSentenceRaw, marks, difficulty, questionIndex, allSentences, usedSentences);
+  const question = draftQuestion(topicRaw, sourceSentenceRaw, marks, difficulty, questionIndex, allSentences, usedSentences, mcq);
   if (question.options) return question;
   // Written questions get a model answer taken from the textbook, with its key terms.
   const source = sourceSentenceRaw.trim();
@@ -610,6 +615,7 @@ function draftQuestion(
   questionIndex: number,
   allSentences: string[],
   usedSentences: Set<string> = new Set(),
+  mcq = marks === 1,
 ): GeneratedQuestion {
   const topic = topicForSentence(topicRaw);
   const sentence = sourceSentenceRaw
@@ -618,20 +624,20 @@ function draftQuestion(
     .replace(/\s+/g, " ")
     .trim() || `The characteristic properties of ${topic}`;
 
-  // 1-Mark Questions: always four-option MCQs, as the Section A instruction ("select one of the four options") requires.
-  if (marks === 1) {
+  // MCQ sections get four-option questions, as the Section A instruction ("select one of the four options") requires.
+  if (mcq) {
     const topicWords = topic.toLowerCase().split(/\s+/).filter((word) => word.length > 3);
     const related = allSentences.filter((candidate) => topicWords.some((word) => candidate.toLowerCase().includes(word)));
     const ordered = [sourceSentenceRaw, ...related, ...allSentences];
     const start = ordered.length > 1 ? questionIndex % ordered.length : 0;
-    let mcq: ReturnType<typeof buildClozeMcq> = null;
-    for (let offset = 0; offset < ordered.length && !mcq; offset += 1) {
+    let cloze: ReturnType<typeof buildClozeMcq> = null;
+    for (let offset = 0; offset < ordered.length && !cloze; offset += 1) {
       const candidate = offset === 0 ? sourceSentenceRaw : ordered[(start + offset) % ordered.length];
       if (offset > 0 && usedSentences.has(candidate)) continue;
-      mcq = buildClozeMcq(candidate, allSentences, questionIndex);
-      if (mcq) usedSentences.add(candidate);
+      cloze = buildClozeMcq(candidate, allSentences, questionIndex);
+      if (cloze) usedSentences.add(candidate);
     }
-    if (mcq) {
+    if (cloze) {
       const lead = difficulty === "Easy"
         ? "Fill in the blank:"
         : difficulty === "Advanced"
@@ -639,12 +645,12 @@ function draftQuestion(
           : difficulty === "Application"
             ? "Which term best completes the following observation?"
             : "Choose the correct option to complete the statement:";
-      return { text: `${lead} ${mcq.stem}`, marks: 1, options: mcq.options, answer: mcq.answer };
+      return { text: `${lead} ${cloze.stem}`, marks, options: cloze.options, answer: cloze.answer };
     }
     // Too little textbook text to build options from: fall back to a true/false style choice.
     return {
       text: `State whether the following statement about ${topic} is true or false: ${sentence.replace(/[.]$/, "")}.`,
-      marks: 1,
+      marks,
       options: ["True", "False", "Partly true", "Cannot be determined"],
       answer: "True",
     };
@@ -666,6 +672,15 @@ function draftQuestion(
     if (difficulty === "Advanced") return { text: `${asked} Explain, and state one exception or limitation.`, marks };
     if (difficulty === "Application") return { text: `${asked} Describe an activity or everyday situation that shows this.`, marks };
     return { text: quote ? `${asked} Explain with reference to the statement ${quote} Give an example.` : `${asked} Explain with an example.`, marks };
+  }
+
+  // 1-Mark written questions (MCQ turned off): a one-line answer.
+  if (marks === 1) {
+    if (asked) return { text: `${asked} Answer in one sentence.`, marks };
+    if (difficulty === "Easy") return { text: `Define ${topic}.`, marks };
+    if (difficulty === "Advanced") return { text: `State one reason why ${topic} is important.`, marks };
+    if (difficulty === "Application") return { text: `Give one example of ${topic} from everyday life.`, marks };
+    return { text: `What is meant by ${topic}?`, marks };
   }
 
   // 2-Mark Questions (Very Short Answer)
@@ -994,12 +1009,13 @@ export function draftQuestionSections(
           sentences,
           usedSentences,
           textbookText,
+          isMcqSection(section),
         );
         if (!usedTexts.has(q.text)) break;
       }
       if (!q) continue;
       usedTexts.add(q.text);
-      if (section.marks !== 1) usedSentences.add(sentence);
+      if (!isMcqSection(section)) usedSentences.add(sentence);
       if (typeof q.alternative === "string") {
         const quoted = q.alternative.match(/"([^"]+)"/)?.[1];
         if (quoted) usedSentences.add(quoted);
