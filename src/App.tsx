@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef } from "react";
+import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import type { BlueprintAnalysis, GeneratedQuestion, GeneratedSection } from "./blueprint";
 import {
   DEFAULT_TEMPLATE_CONFIG,
@@ -9,6 +9,7 @@ import {
   generateSingleQuestion,
   generateCaseQuestion,
   isCaseBasedSection,
+  isMcqSection,
   extractCleanSentences,
   cleanTopicName,
 } from "./question-generator";
@@ -24,11 +25,11 @@ import {
   savePaperPdf,
   loadPaperPdf,
   migrateLegacyPaperPdfs,
+  clearRemovedFeatureData,
   loadProfile,
   saveProfile,
-  loadApiKey,
-  saveApiKey,
   type TeacherProfile,
+  type SyncResult,
   type StoredPaper,
 } from "./storage";
 import { joinPdfPages, cleanBrokenKerningWords } from "./text-cleaner";
@@ -37,8 +38,8 @@ import { ModelAnswerEditor } from "./model-answer-editor";
 import { useUndoHistory, useUndoShortcuts } from "./use-undo-history";
 import { ProfileDialog } from "./dialogs";
 import { useDialogs } from "./use-dialogs";
-import { AiImprovePanel } from "./ai-improve-panel";
 import { SyncView } from "./sync-view";
+import { useAutoSync } from "./use-auto-sync";
 import "./App.css";
 
 // The PDF and Word libraries are large, so they load only when a file is read or a paper is built.
@@ -91,7 +92,7 @@ function App() {
 
   // Step 2: Pattern
   const [patternMode, setPatternMode] = useState<"manual" | "upload">("manual");
-  const [patternSections, setPatternSections] = useState<Array<{ count: number; marks: number; label?: string; caseBased?: boolean }>>([
+  const [patternSections, setPatternSections] = useState<Array<{ count: number; marks: number; label?: string; caseBased?: boolean; mcq?: boolean }>>([
     { count: 10, marks: 1, label: "Section A" },
     { count: 5, marks: 2, label: "Section B" },
     { count: 4, marks: 3, label: "Section C" },
@@ -168,18 +169,21 @@ function App() {
     .map((word) => word[0].toUpperCase())
     .join("") || "?";
 
+  // Sync with the linked file in the teacher's cloud folder; refresh here when it brings changes.
+  const showSyncedData = useCallback((result: SyncResult) => {
+    setRecentPapers(loadRecentPapers());
+    setProfile(result.profile);
+  }, []);
+  const sync = useAutoSync(showSyncedData);
+
   const [isProfileOpen, setIsProfileOpen] = useState(false);
   const saveProfileEdits = (updated: TeacherProfile) => {
-    setProfile(updated);
     saveProfile(updated);
+    setProfile(loadProfile());
     setIsProfileOpen(false);
+    sync.notifyChanged();
   };
   const dialogs = useDialogs();
-
-  // AI question writing (optional; uses the teacher's own Anthropic API key)
-  const [apiKey, setApiKey] = useState(() => loadApiKey());
-  const [aiStatus, setAiStatus] = useState({ busy: false, message: "", isError: false });
-  const latestDraft = useRef<GeneratedSection[] | null>(null);
 
   // In-app preview URL, released when a newer PDF replaces it
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
@@ -210,6 +214,7 @@ function App() {
 
   // Move PDFs saved inline by older versions out of localStorage so it has room again.
   useEffect(() => {
+    clearRemovedFeatureData();
     void migrateLegacyPaperPdfs().then(setRecentPapers);
     void requestPersistentStorage();
   }, []);
@@ -393,59 +398,6 @@ function App() {
     setDraftEdited(false);
   };
 
-  useEffect(() => {
-    latestDraft.current = draftedSections;
-  }, [draftedSections]);
-
-  const updateApiKey = (key: string) => {
-    setApiKey(key);
-    saveApiKey(key);
-  };
-
-  // Rewrites the whole draft with Claude; the result is one Undo step.
-  const improveWithAi = async () => {
-    const startingDraft = draftedSections;
-    setAiStatus({ busy: true, message: "Claude is rewriting your questions. This usually takes a minute or two…", isError: false });
-    try {
-      const { improveQuestionsWithAI } = await import("./ai-questions");
-      const result = await improveQuestionsWithAI({
-        apiKey,
-        sections: startingDraft,
-        textbookText,
-        topics: selectedTopics,
-        difficulty,
-      });
-      if (
-        latestDraft.current !== startingDraft &&
-        !(await dialogs.confirm(
-          "You changed the questions while the AI was working. Replace them with the AI's version? Undo brings your changes back.",
-          "Use AI version",
-        ))
-      ) {
-        setAiStatus({ busy: false, message: "The AI's version was not used.", isError: false });
-        return;
-      }
-      draftHistory.record();
-      setUndoNotice("");
-      setDraftEdited(true);
-      setDraftedSections(renumberSections(result.sections));
-      setAiStatus({
-        busy: false,
-        message:
-          `Improved ${result.improved} question${result.improved === 1 ? "" : "s"}.` +
-          (result.kept ? ` ${result.kept} kept as drafted because the AI's version didn't fit the paper.` : "") +
-          " Check them below, and use Undo to go back.",
-        isError: false,
-      });
-    } catch (error) {
-      setAiStatus({
-        busy: false,
-        message: error instanceof Error ? error.message : "The AI could not improve the questions.",
-        isError: true,
-      });
-    }
-  };
-
   const confirmDiscardEdits = async (message: string, confirmLabel = "Redraft") =>
     !draftEdited || (await dialogs.confirm(message, confirmLabel));
 
@@ -470,25 +422,23 @@ function App() {
   // Step 2 Pattern Handlers
   const updatePatternSection = (
     index: number,
-    field: "count" | "marks" | "label" | "caseBased",
+    field: "count" | "marks" | "label" | "caseBased" | "mcq",
     value: any,
   ) => {
-    // Typing in one field is a single undo step; ticking "Case-based" is its own.
-    patternHistory.record(field === "caseBased" ? undefined : `${field}-${index}`);
+    const isToggle = field === "caseBased" || field === "mcq";
+    // Typing in one field is a single undo step; ticking "Case-based" or "MCQ" is its own.
+    patternHistory.record(isToggle ? undefined : `${field}-${index}`);
     setPatternSections((current) =>
-      current.map((section, sectionIndex) =>
-        sectionIndex === index
-          ? {
-              ...section,
-              [field]:
-                field === "label"
-                  ? String(value)
-                  : field === "caseBased"
-                    ? Boolean(value)
-                    : Math.max(field === "marks" ? 1 : 0, Number(value)),
-            }
-          : section,
-      ),
+      current.map((section, sectionIndex) => {
+        if (sectionIndex !== index) return section;
+        // A section is either MCQ or case-based, so ticking one unticks the other.
+        if (field === "caseBased") return { ...section, caseBased: Boolean(value), ...(value ? { mcq: false } : {}) };
+        if (field === "mcq") return { ...section, mcq: Boolean(value), ...(value ? { caseBased: false } : {}) };
+        return {
+          ...section,
+          [field]: field === "label" ? String(value) : Math.max(field === "marks" ? 1 : 0, Number(value)),
+        };
+      }),
     );
   };
 
@@ -706,6 +656,8 @@ function App() {
       sentences,
       new Set(),
       textbookText,
+      // A regenerated question keeps its type: MCQ stays MCQ, written stays written.
+      Boolean(current?.options?.length),
     );
 
     draftHistory.record();
@@ -845,6 +797,7 @@ function App() {
         ]);
       }
       setRecentPapers(loadRecentPapers());
+      if (paperSaved) sync.notifyChanged();
     } catch {
       setWarnings((current) => [
         ...current,
@@ -904,7 +857,13 @@ function App() {
             onClick={() => setActiveNav("Sync")}
           >
             <span className="nav-icon">⇅</span>Sync
+            {sync.handle && <span className={`sync-dot ${sync.state}`} title={sync.message} aria-hidden="true" />}
           </button>
+          {sync.state === "needs-access" && (
+            <button className="sync-nudge" onClick={sync.syncNow}>
+              Click to sync with {sync.handle?.name}
+            </button>
+          )}
         </nav>
         <div className="sidebar-bottom">
           <button className="profile" onClick={() => setIsProfileOpen(true)} title="Edit your name and department">
@@ -938,12 +897,7 @@ function App() {
         <div className="content-wrap">
           {/* SYNC VIEW */}
           {activeNav === "Sync" && (
-            <SyncView
-              onLoaded={(result) => {
-                setRecentPapers(loadRecentPapers());
-                setProfile(result.profile);
-              }}
-            />
+            <SyncView sync={sync} onLoaded={showSyncedData} />
           )}
 
           {/* RECENT PAPERS VIEW */}
@@ -1003,7 +957,10 @@ function App() {
                         )}
                         <button
                           className="q-delete-btn"
-                          onClick={() => setRecentPapers(deleteRecentPaper(paper.id))}
+                          onClick={() => {
+                            setRecentPapers(deleteRecentPaper(paper.id));
+                            sync.notifyChanged();
+                          }}
                         >
                           Delete
                         </button>
@@ -1359,6 +1316,14 @@ function App() {
                               }
                             />
                             <span>marks</span>
+                            <label className="case-toggle" title="Four-option multiple-choice questions with one correct answer">
+                              <input
+                                type="checkbox"
+                                checked={isMcqSection(section)}
+                                onChange={(event) => updatePatternSection(index, "mcq", event.target.checked)}
+                              />
+                              MCQ
+                            </label>
                             <label className="case-toggle" title="Passage with (i), (ii), (iii) sub-questions, as in CBSE Section E">
                               <input
                                 type="checkbox"
@@ -1617,14 +1582,6 @@ function App() {
                         ),
                       )}
                     </div>
-
-                    <AiImprovePanel
-                      apiKey={apiKey}
-                      onApiKeyChange={updateApiKey}
-                      onImprove={() => void improveWithAi()}
-                      status={aiStatus}
-                      hasTextbook={Boolean(textbookText.trim())}
-                    />
 
                     {/* QUESTION REVIEW & EDITOR SECTION */}
                     <div className="question-review-wrap">
@@ -1907,10 +1864,7 @@ function App() {
                 <li>Step 1: Upload your course material (PDF or DOCX) to extract topics.</li>
                 <li>Step 2: Set your question pattern (sections, counts, and marks).</li>
                 <li>Step 3: Upload a previous blueprint PDF or use our Standard Institutional Header.</li>
-                <li>
-                  Step 4: Review and edit the questions, optionally improve them with AI using your own Anthropic API
-                  key, then generate the paper and its answer key.
-                </li>
+                <li>Step 4: Review and edit the questions, then generate the paper and its answer key.</li>
                 <li>Sync between computers: keep one sync file in your OneDrive, Google Drive or Dropbox folder.</li>
               </ul>
             </div>

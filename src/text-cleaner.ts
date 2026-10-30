@@ -264,7 +264,7 @@ export const toRomanNumeral = (num: number): string => {
  * Generates official CBSE-style General Instructions dynamically matching the exact pattern.
  */
 export function generatePatternGeneralInstructions(
-  sections: Array<{ label: string; questions: Array<{ marks?: number; kind?: string }> }>,
+  sections: Array<{ label: string; questions: Array<{ marks?: number; kind?: string; options?: string[] }> }>,
 ): string[] {
   const totalQuestions = sections.reduce((sum, s) => sum + s.questions.length, 0);
   const numSections = sections.length;
@@ -297,8 +297,8 @@ export function generatePatternGeneralInstructions(
     const sLabel = sec.label.replace(/^section\s+/i, "Section ");
 
     let questionTypeDesc = "questions";
-    if (marks === 1) questionTypeDesc = "Multiple Choice (MCQs) / Objective questions";
-    else if (marks === 2) questionTypeDesc = "Very Short Answer type questions";
+    if (sec.questions.every((question) => question.options?.length)) questionTypeDesc = "Multiple Choice (MCQs) / Objective questions";
+    else if (marks <= 2) questionTypeDesc = "Very Short Answer type questions";
     else if (marks === 3) questionTypeDesc = "Short Answer type questions";
     else if (marks >= 4) questionTypeDesc = "Long Answer type questions";
     if (sec.questions.every((question) => question.kind === "case")) {
