@@ -5,9 +5,21 @@ import { findTopics, headingContinues } from "./topic-finder";
 export interface QuestionGeneratorOptions {
   textbookText: string;
   selectedTopics: string[];
-  difficulty: "Easy" | "Moderate" | "Advanced" | "Application" | string;
+  difficulty: "Easy" | "Moderate" | "Advanced" | "Application" | "Mixed" | string;
   patternSections: Array<{ count: number; marks: number; label?: string; caseBased?: boolean; mcq?: boolean }>;
 }
+
+const MIXED_LEVELS = ["Easy", "Moderate", "Advanced", "Application"];
+
+/**
+ * The level one question is written at. A "Mixed" paper takes the four levels in turn, shifting the order
+ * each round (Easy, Moderate, Advanced, Application, then Moderate, Advanced, ...) so every level appears
+ * equally and the same level does not always get the same wording.
+ */
+export const levelForQuestion = (difficulty: string, questionNumber: number) =>
+  difficulty === "Mixed"
+    ? MIXED_LEVELS[(questionNumber + Math.floor(questionNumber / MIXED_LEVELS.length)) % MIXED_LEVELS.length]
+    : difficulty;
 
 /** CBSE's source/case-based items carry 4 marks, so 4-mark sections default to case-based. */
 export const isCaseBasedSection = (section: { marks: number; caseBased?: boolean }) =>
@@ -686,6 +698,9 @@ function draftQuestion(
     .replace(/\s+/g, " ")
     .trim() || `The characteristic properties of ${topic}`;
 
+  // Several wordings per kind of question, taken in turn, so neighbouring questions do not read alike.
+  const pick = <T,>(variants: T[]) => variants[questionIndex % variants.length];
+
   // MCQ sections get four-option questions, as the Section A instruction ("select one of the four options") requires.
   if (mcq) {
     const topicWords = topic.toLowerCase().split(/\s+/).filter((word) => word.length > 3);
@@ -700,27 +715,57 @@ function draftQuestion(
       if (cloze) usedSentences.add(candidate);
     }
     if (cloze) {
-      const lead = difficulty === "Easy"
-        ? "Fill in the blank:"
-        : difficulty === "Advanced"
-          ? "Identify the term that correctly completes the statement:"
-          : difficulty === "Application"
-            ? "Which term best completes the following observation?"
-            : "Choose the correct option to complete the statement:";
+      const lead = pick(
+        difficulty === "Easy"
+          ? ["Fill in the blank:", "Complete the sentence with the correct word:", "Choose the missing word:"]
+          : difficulty === "Advanced"
+            ? [
+                "Identify the term that correctly completes the statement:",
+                "Which term makes the following statement accurate?",
+                "Select the most precise term for the blank:",
+              ]
+            : difficulty === "Application"
+              ? [
+                  "Which term best completes the following observation?",
+                  "Which word would correctly complete this statement in a real situation?",
+                  "Apply what you have learnt: which term fills the blank?",
+                ]
+              : [
+                  "Choose the correct option to complete the statement:",
+                  "Select the word that correctly fills the blank:",
+                  "Which option completes the statement correctly?",
+                  "Pick the right term for the blank:",
+                ],
+      );
       return { text: `${lead} ${cloze.stem}`, marks, options: cloze.options, answer: cloze.answer };
     }
     // Too few key terms for a blank: ask which statement is about the topic instead.
     const statement = buildStatementMcq(topic, sourceSentenceRaw, ownSentences, allSentences, questionIndex, usedSentences);
     if (statement) {
       usedSentences.add(statement.answer);
-      const ask = difficulty === "Advanced" || difficulty === "Application"
-        ? `Which of the following statements correctly describes ${topic}?`
-        : `Which of the following statements is about ${topic}?`;
+      const ask = pick(
+        difficulty === "Advanced" || difficulty === "Application"
+          ? [
+              `Which of the following statements correctly describes ${topic}?`,
+              `Which statement is true of ${topic}?`,
+              `Select the statement that best explains ${topic}.`,
+            ]
+          : [
+              `Which of the following statements is about ${topic}?`,
+              `Which statement below relates to ${topic}?`,
+              `Identify the statement that describes ${topic}.`,
+            ],
+      );
       return { text: ask, marks, options: statement.options, answer: statement.answer };
     }
     // Too little textbook text even for that: fall back to a true/false style choice.
+    const claim = sentence.replace(/[.]$/, "");
     return {
-      text: `State whether the following statement about ${topic} is true or false: ${sentence.replace(/[.]$/, "")}.`,
+      text: pick([
+        `State whether the following statement about ${topic} is true or false: ${claim}.`,
+        `Is the following statement about ${topic} true or false? ${claim}.`,
+        `Read this statement about ${topic} and decide whether it is true or false: ${claim}.`,
+      ]),
       marks,
       options: ["True", "False", "Partly true", "Cannot be determined"],
       answer: "True",
@@ -729,57 +774,177 @@ function draftQuestion(
 
   // Written questions quote a textbook sentence about the topic; with none available they ask about the topic itself.
   const quote = sourceSentenceRaw.trim() ? `"${sentence.replace(/\.$/, "")}."` : "";
+  // The quoted idea without its quotation marks, for questions that work it into a sentence
+  // ("the idea that aerobic respiration..."); an abbreviation such as "DNA" keeps its capitals.
+  const unquoted = quote.replace(/^"|\."$/g, "");
+  const idea = /^[A-Z][a-z]/.test(unquoted) ? unquoted.charAt(0).toLowerCase() + unquoted.slice(1) : unquoted;
 
   // A question-style heading ("How do metals react with water?") is asked directly.
   const asked = askedHeading(topicRaw);
   if (asked && marks === 2) {
-    if (difficulty === "Easy") return { text: `${asked} Answer briefly.`, marks };
-    if (difficulty === "Advanced") return { text: `${asked} Give two reasons.`, marks };
-    if (difficulty === "Application") return { text: `${asked} Give one example from daily life.`, marks };
-    return { text: quote ? `${asked} Answer in two points, using the statement: ${quote}` : `${asked} Answer in two points.`, marks };
+    if (difficulty === "Easy") return { text: pick([`${asked} Answer briefly.`, `${asked} Answer in two or three sentences.`]), marks };
+    if (difficulty === "Advanced") return { text: pick([`${asked} Give two reasons.`, `${asked} Support your answer with two reasons.`]), marks };
+    if (difficulty === "Application") return { text: pick([`${asked} Give one example from daily life.`, `${asked} Use an everyday example in your answer.`]), marks };
+    return {
+      text: quote
+        ? pick([`${asked} Answer in two points, using the statement: ${quote}`, `${asked} Use the statement ${quote} in your answer.`])
+        : pick([`${asked} Answer in two points.`, `${asked} Write two points.`]),
+      marks,
+    };
   }
   if (asked && marks === 3) {
-    if (difficulty === "Easy") return { text: `${asked} Answer in three points.`, marks };
-    if (difficulty === "Advanced") return { text: `${asked} Explain, and state one exception or limitation.`, marks };
-    if (difficulty === "Application") return { text: `${asked} Describe an activity or everyday situation that shows this.`, marks };
-    return { text: quote ? `${asked} Explain with reference to the statement ${quote} Give an example.` : `${asked} Explain with an example.`, marks };
+    if (difficulty === "Easy") return { text: pick([`${asked} Answer in three points.`, `${asked} Write three points.`]), marks };
+    if (difficulty === "Advanced") return { text: pick([`${asked} Explain, and state one exception or limitation.`, `${asked} Explain your answer and mention one limitation.`]), marks };
+    if (difficulty === "Application") return { text: pick([`${asked} Describe an activity or everyday situation that shows this.`, `${asked} Explain using a situation from daily life.`]), marks };
+    return {
+      text: quote
+        ? pick([`${asked} Explain with reference to the statement ${quote} Give an example.`, `${asked} Use the statement ${quote} and an example in your answer.`])
+        : pick([`${asked} Explain with an example.`, `${asked} Explain, and give one example.`]),
+      marks,
+    };
   }
 
   // 1-Mark written questions (MCQ turned off): a one-line answer.
   if (marks === 1) {
-    if (asked) return { text: `${asked} Answer in one sentence.`, marks };
-    if (difficulty === "Easy") return { text: `Define ${topic}.`, marks };
-    if (difficulty === "Advanced") return { text: `State one reason why ${topic} is important.`, marks };
-    if (difficulty === "Application") return { text: `Give one example of ${topic} from everyday life.`, marks };
-    return { text: `What is meant by ${topic}?`, marks };
+    if (asked) return { text: pick([`${asked} Answer in one sentence.`, `${asked} Answer in one line.`]), marks };
+    if (difficulty === "Easy") return { text: pick([`Define ${topic}.`, `What is ${topic}?`, `Write one sentence about ${topic}.`]), marks };
+    if (difficulty === "Advanced") {
+      return { text: pick([`State one reason why ${topic} is important.`, `Why is ${topic} important? Answer in one sentence.`, `Give one reason ${topic} matters.`]), marks };
+    }
+    if (difficulty === "Application") {
+      return {
+        text: pick([`Give one example of ${topic} from everyday life.`, `Where do we come across ${topic} in daily life? Give one example.`, `Name one everyday situation that involves ${topic}.`]),
+        marks,
+      };
+    }
+    return { text: pick([`What is meant by ${topic}?`, `Write a one-line definition of ${topic}.`, `State one fact about ${topic}.`]), marks };
   }
 
   // 2-Mark Questions (Very Short Answer)
   if (marks === 2) {
     if (quote) {
-      if (difficulty === "Easy") return { text: `Read the statement: ${quote} State two points about ${topic} that it tells us.`, marks };
-      if (difficulty === "Advanced") return { text: `Justify the following statement with two reasons: ${quote}`, marks };
-      if (difficulty === "Application") return { text: `Give one example from everyday life or the laboratory that illustrates this idea from ${topic}, and explain it briefly: ${quote}`, marks };
-      return { text: `Explain the following statement about ${topic} in your own words: ${quote}`, marks };
+      if (difficulty === "Easy") {
+        return {
+          text: pick([
+            `Read the statement: ${quote} State two points about ${topic} that it tells us.`,
+            `${quote} What two facts about ${topic} does this statement give?`,
+            `Study the statement ${quote} List two points it makes about ${topic}.`,
+          ]),
+          marks,
+        };
+      }
+      if (difficulty === "Advanced") {
+        return {
+          text: pick([
+            `Justify the following statement with two reasons: ${quote}`,
+            `Give two reasons why the following statement is true: ${quote}`,
+            `${quote} Support this statement with two reasons.`,
+          ]),
+          marks,
+        };
+      }
+      if (difficulty === "Application") {
+        return {
+          text: pick([
+            `Give one example from everyday life or the laboratory that illustrates this idea from ${topic}, and explain it briefly: ${quote}`,
+            `${quote} Describe one everyday situation that shows this idea from ${topic}.`,
+            `Where can you see the idea that ${idea} in daily life? Give one example and explain it.`,
+          ]),
+          marks,
+        };
+      }
+      return {
+        text: pick([
+          `Explain the following statement about ${topic} in your own words: ${quote}`,
+          `What does the statement ${quote} tell us about ${topic}? Explain briefly.`,
+          `In your own words, explain this idea from ${topic}: ${quote}`,
+        ]),
+        marks,
+      };
     }
-    if (difficulty === "Easy") return { text: `Define ${topic}. Give one example.`, marks };
-    if (difficulty === "Advanced") return { text: `Explain why ${topic} is important. Give two reasons.`, marks };
-    if (difficulty === "Application") return { text: `Give one real-life example of ${topic} and explain how it takes place.`, marks };
-    return { text: `What is meant by ${topic}? Explain briefly with an example.`, marks };
+    if (difficulty === "Easy") return { text: pick([`Define ${topic}. Give one example.`, `What is ${topic}? Give one example.`, `Write a short note on ${topic} with one example.`]), marks };
+    if (difficulty === "Advanced") {
+      return { text: pick([`Explain why ${topic} is important. Give two reasons.`, `Give two reasons why ${topic} is important.`, `Why does ${topic} matter? State two reasons.`]), marks };
+    }
+    if (difficulty === "Application") {
+      return {
+        text: pick([
+          `Give one real-life example of ${topic} and explain how it takes place.`,
+          `Describe one situation from daily life that involves ${topic}.`,
+          `How is ${topic} useful in everyday life? Give one example.`,
+        ]),
+        marks,
+      };
+    }
+    return { text: pick([`What is meant by ${topic}? Explain briefly with an example.`, `Explain ${topic} in two or three sentences.`, `Briefly describe ${topic} with an example.`]), marks };
   }
 
   // 3-Mark Questions (Short Answer)
   if (marks === 3) {
     if (quote) {
-      if (difficulty === "Easy") return { text: `${quote} (a) What does this statement tell us about ${topic}? (b) Give one example. (c) State one more related fact.`, marks };
-      if (difficulty === "Advanced") return { text: `${quote} (i) Explain the idea behind this statement. (ii) What would happen if it were not true? (iii) How is it related to ${topic}?`, marks };
-      if (difficulty === "Application") return { text: `Using the idea that ${quote.replace(/^"|\."$/g, "")}, describe a real-life situation where ${topic} can be seen. What would change if the conditions were different?`, marks };
-      return { text: `Explain the statement ${quote} with reference to ${topic}. Support your answer with an example.`, marks };
+      if (difficulty === "Easy") {
+        return {
+          text: pick([
+            `${quote} (a) What does this statement tell us about ${topic}? (b) Give one example. (c) State one more related fact.`,
+            `Read the statement ${quote} (a) What is it about? (b) Give an example. (c) Add one more fact about ${topic}.`,
+          ]),
+          marks,
+        };
+      }
+      if (difficulty === "Advanced") {
+        return {
+          text: pick([
+            `${quote} (i) Explain the idea behind this statement. (ii) What would happen if it were not true? (iii) How is it related to ${topic}?`,
+            `Analyse the statement ${quote} (i) What does it mean? (ii) Why is it true? (iii) How does it connect to ${topic}?`,
+          ]),
+          marks,
+        };
+      }
+      if (difficulty === "Application") {
+        return {
+          text: pick([
+            `Using the idea that ${idea}, describe a real-life situation where ${topic} can be seen. What would change if the conditions were different?`,
+            `Think about the statement ${quote} Describe a real situation that shows it, and explain what would change under different conditions.`,
+          ]),
+          marks,
+        };
+      }
+      return {
+        text: pick([
+          `Explain the statement ${quote} with reference to ${topic}. Support your answer with an example.`,
+          `${quote} Explain this statement and give an example related to ${topic}.`,
+          `With reference to ${topic}, explain what the following statement means and give an example: ${quote}`,
+        ]),
+        marks,
+      };
     }
-    if (difficulty === "Easy") return { text: `Describe ${topic} in three points.`, marks };
-    if (difficulty === "Advanced") return { text: `Explain ${topic}. How is it different from a related process you have studied? Give one reason for the difference.`, marks };
-    if (difficulty === "Application") return { text: `Describe a situation in which ${topic} can be observed. Explain, step by step, what happens.`, marks };
-    return { text: `Explain ${topic} with the help of an example. State one advantage or use of it.`, marks };
+    if (difficulty === "Easy") return { text: pick([`Describe ${topic} in three points.`, `Write three points about ${topic}.`, `List three features of ${topic}.`]), marks };
+    if (difficulty === "Advanced") {
+      return {
+        text: pick([
+          `Explain ${topic}. How is it different from a related process you have studied? Give one reason for the difference.`,
+          `Compare ${topic} with a related idea you have studied. Give one similarity and one difference.`,
+        ]),
+        marks,
+      };
+    }
+    if (difficulty === "Application") {
+      return {
+        text: pick([
+          `Describe a situation in which ${topic} can be observed. Explain, step by step, what happens.`,
+          `How would you show ${topic} to a classmate? Describe the steps and what you would observe.`,
+        ]),
+        marks,
+      };
+    }
+    return {
+      text: pick([
+        `Explain ${topic} with the help of an example. State one advantage or use of it.`,
+        `Explain ${topic}. Give one example and one use.`,
+        `What is ${topic}? Explain it with an example and state why it is useful.`,
+      ]),
+      marks,
+    };
   }
 
   // 4 or 5+ Marks (Long Answer with an OR choice)
@@ -799,32 +964,56 @@ function draftQuestion(
   let altText = "";
   if (difficulty === "Easy") {
     mainText = quote
-      ? `Describe ${topic} in detail. Explain the statement ${quote} Draw a neat, labelled diagram wherever necessary.`
-      : `Describe ${topic} in detail. Draw a neat, labelled diagram wherever necessary.`;
+      ? pick([
+          `Describe ${topic} in detail. Explain the statement ${quote} Draw a neat, labelled diagram wherever necessary.`,
+          `Write a detailed account of ${topic}, explaining the statement ${quote} Add a labelled diagram where it helps.`,
+        ])
+      : pick([
+          `Describe ${topic} in detail. Draw a neat, labelled diagram wherever necessary.`,
+          `Write a detailed account of ${topic}. Add a labelled diagram where it helps.`,
+        ]);
     altText = altQuote
-      ? `Explain the following statement in detail with suitable examples: ${altQuote}`
-      : `Write a detailed note on ${topic} with suitable examples.`;
+      ? pick([`Explain the following statement in detail with suitable examples: ${altQuote}`, `${altQuote} Explain this statement in detail, with examples.`])
+      : pick([`Write a detailed note on ${topic} with suitable examples.`, `Explain ${topic} in detail, with examples.`]);
   } else if (difficulty === "Advanced") {
     mainText = quote
-      ? `(a) Explain the statement ${quote} in the context of ${topic}. (b) Compare it with a related process you have studied. (c) Discuss its significance.`
-      : `(a) Explain ${topic} in detail. (b) Compare it with a related process you have studied. (c) Discuss its significance.`;
+      ? pick([
+          `(a) Explain the statement ${quote} in the context of ${topic}. (b) Compare it with a related process you have studied. (c) Discuss its significance.`,
+          `${quote} (a) Explain this statement in relation to ${topic}. (b) Contrast it with a related idea. (c) Assess why it matters.`,
+        ])
+      : pick([
+          `(a) Explain ${topic} in detail. (b) Compare it with a related process you have studied. (c) Discuss its significance.`,
+          `(a) Give a detailed explanation of ${topic}. (b) Contrast it with a related idea you have studied. (c) Assess why it matters.`,
+        ]);
     altText = altQuote
-      ? `Evaluate the statement ${altQuote} Give reasons and examples to support your answer.`
-      : `Evaluate the importance of ${topic}. Give reasons and examples to support your answer.`;
+      ? pick([`Evaluate the statement ${altQuote} Give reasons and examples to support your answer.`, `How far do you agree with the statement ${altQuote} Give reasons and examples.`])
+      : pick([`Evaluate the importance of ${topic}. Give reasons and examples to support your answer.`, `Assess how important ${topic} is, with reasons and examples.`]);
   } else if (difficulty === "Application") {
     mainText = quote
-      ? `A student studying ${topic} reads: ${quote} Explain how this idea can be observed or tested, and describe the result you would expect.`
-      : `Explain how ${topic} can be observed or demonstrated, and describe the result you would expect.`;
+      ? pick([
+          `A student studying ${topic} reads: ${quote} Explain how this idea can be observed or tested, and describe the result you would expect.`,
+          `${quote} Plan how you would observe or test this idea from ${topic}, and describe the result you expect.`,
+        ])
+      : pick([
+          `Explain how ${topic} can be observed or demonstrated, and describe the result you would expect.`,
+          `Plan a simple way to observe or demonstrate ${topic}, and describe the result you expect.`,
+        ]);
     altText = altQuote
-      ? `Describe a real-life situation that shows the following idea, and explain it in detail: ${altQuote}`
-      : `Describe a real-life situation where ${topic} is seen, and explain it in detail.`;
+      ? pick([`Describe a real-life situation that shows the following idea, and explain it in detail: ${altQuote}`, `${altQuote} Describe a real-life situation that shows this idea, and explain it in detail.`])
+      : pick([`Describe a real-life situation where ${topic} is seen, and explain it in detail.`, `Explain, in detail, one real-life situation that involves ${topic}.`]);
   } else {
     mainText = quote
-      ? `Explain ${topic} in detail. (a) What does the statement ${quote} mean? (b) Describe the steps or stages involved. (c) State its importance.`
-      : `Explain ${topic} in detail. (a) What is it? (b) Describe the steps or stages involved. (c) State its importance.`;
+      ? pick([
+          `Explain ${topic} in detail. (a) What does the statement ${quote} mean? (b) Describe the steps or stages involved. (c) State its importance.`,
+          `${quote} (a) Explain what this statement says about ${topic}. (b) Describe the steps or stages involved. (c) Why is it important?`,
+        ])
+      : pick([
+          `Explain ${topic} in detail. (a) What is it? (b) Describe the steps or stages involved. (c) State its importance.`,
+          `Write a detailed answer on ${topic}: (a) what it is, (b) the steps or stages involved, and (c) why it is important.`,
+        ]);
     altText = altQuote
-      ? `Discuss the following statement with suitable examples: ${altQuote}`
-      : `Discuss ${topic} with suitable examples.`;
+      ? pick([`Discuss the following statement with suitable examples: ${altQuote}`, `${altQuote} Discuss this statement, using examples.`])
+      : pick([`Discuss ${topic} with suitable examples.`, `Write a detailed note on ${topic}, using examples.`]);
   }
   if (asked) {
     const extra = quote ? ` Include an explanation of the statement ${quote}` : "";
@@ -1063,6 +1252,7 @@ export function draftQuestionSections(
       // The paper-wide question count alone picks the topic, so consecutive questions move one topic on.
       let sentence = "";
       let q: GeneratedQuestion | null = null;
+      const level = levelForQuestion(difficulty, globalQuestionCounter);
       for (let attempt = 0; attempt < topics.length; attempt += 1) {
         const topic = topics[(globalQuestionCounter + attempt) % topics.length];
         sentence = getSourceSentence(topic, globalQuestionCounter + qIndex);
@@ -1070,13 +1260,13 @@ export function draftQuestionSections(
         let caseQuestion: GeneratedQuestion | null = null;
         for (let offset = 0; isCaseBasedSection(section) && !caseQuestion && offset < topics.length; offset += 1) {
           const caseTopic = topics[(globalQuestionCounter + attempt + offset) % topics.length];
-          caseQuestion = generateCaseQuestion(caseTopic, textbookText, section.marks, difficulty, globalQuestionCounter + qIndex + attempt, usedSentences);
+          caseQuestion = generateCaseQuestion(caseTopic, textbookText, section.marks, level, globalQuestionCounter + qIndex + attempt, usedSentences);
         }
         q = caseQuestion || generateSingleQuestion(
           topic,
           sentence,
           section.marks,
-          difficulty,
+          level,
           globalQuestionCounter + 1,
           sentences,
           usedSentences,

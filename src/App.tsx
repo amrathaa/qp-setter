@@ -8,6 +8,7 @@ import {
   draftQuestionSections,
   generateSingleQuestion,
   generateCaseQuestion,
+  levelForQuestion,
   isCaseBasedSection,
   isMcqSection,
   extractCleanSentences,
@@ -431,6 +432,7 @@ function App() {
     setUndoNotice("");
     setGenerated(false);
     showGeneratedPdf(null);
+    setOpenedSavedPaper(true);
     setActiveNav("New paper");
     setActiveStep(3);
   };
@@ -442,12 +444,25 @@ function App() {
     redraft();
   };
 
+  // The later steps need a textbook to draft from, unless a saved paper was reopened with its questions.
+  const [openedSavedPaper, setOpenedSavedPaper] = useState(false);
+  const textbookBlocker = isAnalyzing
+    ? "Reading your textbook…"
+    : !textbookText.trim()
+      ? "Add a textbook to continue."
+      : selectedTopics.length === 0
+        ? "Choose at least one topic to continue."
+        : "";
+  const canLeaveTextbook = !textbookBlocker || openedSavedPaper;
+
   const goToStep = (index: number) => {
+    if (index > 0 && !canLeaveTextbook) return;
     if (index === 3) void refreshDraftOnEnter();
     setActiveStep(index);
   };
 
   const nextStep = () => {
+    if (activeStep === 0 && !canLeaveTextbook) return;
     const next = Math.min(activeStep + 1, steps.length - 1);
     if (next === 3) void refreshDraftOnEnter();
     setActiveStep(next);
@@ -677,16 +692,19 @@ function App() {
     const sentence = pickRandomItem(sentences, topic);
     const current = draftedSections[sectionIndex]?.questions[questionIndex];
     const marks = current?.marks || 1;
+    // On a "Mixed" paper each regenerate picks a level for the new question.
+    const level = levelForQuestion(difficulty, regenerateCount.current + questionIndex);
 
     const freshCase = current?.kind === "case"
-      ? generateCaseQuestion(pickRandomItem(topics, topic), textbookText, marks, difficulty, (regenerateCount.current += 1) * 7 + questionIndex)
+      ? generateCaseQuestion(pickRandomItem(topics, topic), textbookText, marks, level, (regenerateCount.current += 1) * 7 + questionIndex)
       : null;
     const fresh = freshCase || generateSingleQuestion(
       topic,
       sentence,
       marks,
-      difficulty,
-      questionIndex + 1,
+      level,
+      // Each regenerate moves on, so the question gets a different wording and source sentence.
+      questionIndex + 1 + (regenerateCount.current += 1),
       sentences,
       new Set(),
       textbookText,
@@ -1071,6 +1089,8 @@ function App() {
                     key={step.number}
                     className={`step ${activeStep === index ? "selected" : ""} ${index < activeStep ? "complete" : ""}`}
                     onClick={() => goToStep(index)}
+                    disabled={index > 0 && !canLeaveTextbook}
+                    title={index > 0 && !canLeaveTextbook ? textbookBlocker : undefined}
                   >
                     <span className="step-number">
                       {index < activeStep ? "✓" : step.number}
@@ -1265,7 +1285,7 @@ function App() {
 
                     <div className="panel-actions">
                       <span>Step 1 of 4</span>
-                      <button className="next-button" onClick={nextStep}>
+                      <button className="next-button" onClick={nextStep} disabled={!canLeaveTextbook}>
                         Continue to pattern <span>→</span>
                       </button>
                     </div>
@@ -1311,12 +1331,14 @@ function App() {
                             ↷ Redo
                           </button>
                         </div>
-                        <div className="pattern-labels">
-                          <span>Section &amp; Count</span>
+                        <div className="pattern-labels pattern-grid">
+                          <span>Section</span>
+                          <span>Questions</span>
+                          <span />
                           <span>Marks</span>
                         </div>
                         {patternSections.map((section, index) => (
-                          <div className="pattern-row-custom" key={index}>
+                          <div className="pattern-row-custom pattern-grid" key={index}>
                             <input
                               className="pattern-label-input"
                               type="text"
@@ -1601,7 +1623,7 @@ function App() {
                     </div>
 
                     <div className="difficulty-options">
-                      {["Easy", "Moderate", "Advanced", "Application"].map(
+                      {["Easy", "Moderate", "Advanced", "Application", "Mixed"].map(
                         (level) => (
                           <button
                             key={level}

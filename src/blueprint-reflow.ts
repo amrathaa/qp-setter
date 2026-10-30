@@ -8,6 +8,7 @@ import {
 } from "pdf-lib";
 import { mapPaperFont } from "./blueprint";
 import { stripPageText } from "./content-strip";
+import { assetUrl } from "./asset-url";
 import type {
   BlueprintAnalysis,
   BlueprintFillResult,
@@ -34,9 +35,9 @@ type PagePlanLine = PlannedLine & { y: number };
 type PagePlan = { sourcePageIndex: number; startY: number; cursorY: number; lines: PagePlanLine[]; report: BlueprintReportRow[] };
 
 const fontAssets: Record<BlueprintAnalysis["paperFont"], FontAsset> = {
-  carlito: { regular: "/fonts/LiberationSans-Regular.ttf", bold: "/fonts/LiberationSans-Bold.ttf" },
-  liberationSans: { regular: "/fonts/LiberationSans-Regular.ttf", bold: "/fonts/LiberationSans-Bold.ttf" },
-  liberationSerif: { regular: "/fonts/LiberationSerif-Regular.ttf", bold: "/fonts/LiberationSerif-Bold.ttf" },
+  carlito: { regular: assetUrl("fonts/LiberationSans-Regular.ttf"), bold: assetUrl("fonts/LiberationSans-Bold.ttf") },
+  liberationSans: { regular: assetUrl("fonts/LiberationSans-Regular.ttf"), bold: assetUrl("fonts/LiberationSans-Bold.ttf") },
+  liberationSerif: { regular: assetUrl("fonts/LiberationSerif-Regular.ttf"), bold: assetUrl("fonts/LiberationSerif-Bold.ttf") },
 };
 
 const textReplacements: Record<string, string> = {
@@ -667,7 +668,7 @@ const drawPlannedLine = (
 // Header-field fonts follow the header's own typeface (often Calibri) rather than the body font.
 const headerFieldFontAssets: Record<BlueprintAnalysis["paperFont"], FontAsset> = {
   ...fontAssets,
-  carlito: { regular: "/fonts/Carlito-Regular.ttf", bold: "/fonts/Carlito-Bold.ttf" },
+  carlito: { regular: assetUrl("fonts/Carlito-Regular.ttf"), bold: assetUrl("fonts/Carlito-Bold.ttf") },
 };
 
 const embedHeaderFieldFont = async (document: PDFDocument, field: BlueprintHeaderField, fallback: PaperFonts) => {

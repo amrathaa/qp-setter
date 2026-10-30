@@ -17,7 +17,7 @@
 @media (max-width:680px){.page-intro{display:block}.progress-block{margin-top:28px;width:100%}.stepper{gap:5px;margin-top:34px}.step{gap:5px}.step small{display:none}.builder-grid{display:block}.side-stack{margin-top:14px}.builder-card{padding:21px 18px}.card-heading h2{font-size:15.5px}.status-pill{font-size:10px}.content-wrap{padding:32px 17px}.topbar{padding:0 17px}.help span{display:none}.action-bar{align-items:stretch;flex-direction:column;gap:15px}.generate{width:100%}.difficulty-options{grid-template-columns:repeat(2,1fr);gap:8px}.difficulty{padding:10px 3px}}
 .theme-preview{margin-top:14px;padding:14px;background:#f7faf4;border:1px solid #dfe8dc;border-radius:6px;color:#647269;font-size:12px}.theme-preview>strong{display:block;color:var(--ink);font-size:13px;margin-bottom:10px}.theme-controls{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}.theme-controls label{display:flex;flex-direction:column;gap:4px}.theme-controls select,.theme-controls input{border:1px solid #d8e2d8;border-radius:4px;background:white;color:var(--ink);font:inherit;padding:6px}.theme-preview>small{display:block;margin-top:12px;color:#8d9990;line-height:1.5}.logo-preview{display:flex;align-items:center;gap:10px;margin-top:12px}.logo-preview img{width:42px;height:42px;object-fit:contain;border:1px solid #d8e2d8;background:white}.logo-preview button{border:0;background:none;color:var(--green);font-size:12px;padding:0}@media (max-width:680px){.theme-controls{grid-template-columns:repeat(2,1fr)}}
 .template-preview{margin-top:14px;padding:14px;background:#fff;border:1px solid #dfe8dc;border-radius:6px;color:#647269;font-size:12px}.template-preview>strong{display:block;color:var(--ink);font-size:13px;margin-bottom:10px}.template-fields{display:grid;grid-template-columns:1fr 1fr;gap:8px}.template-fields label,.template-instructions,.template-sections{display:flex;flex-direction:column;gap:4px}.template-fields input,.template-instructions textarea,.template-section-row input{border:1px solid #d8e2d8;border-radius:4px;background:white;color:var(--ink);font:inherit;padding:7px}.template-instructions{margin-top:10px}.template-instructions textarea{resize:vertical;line-height:1.5}.template-sections{margin-top:12px;gap:7px}.template-section-row{display:grid;grid-template-columns:1fr 1.5fr auto;gap:6px}.template-section-row button{border:0;background:transparent;color:#b6614d;font-size:16px}.template-preview input::placeholder,.template-preview textarea::placeholder{color:#a6b0a8}.template-preview .add-section{align-self:flex-start}
-.design-upload{cursor:pointer}.design-upload input{display:none}.design-upload-add{margin-left:auto;border:0;background:#e4f0df;color:var(--green);width:22px;height:22px;border-radius:50%;display:grid;place-items:center}.blueprint-status,.blueprint-warning,.generation-warnings{margin:12px 0 0;font-size:13px;line-height:1.5}.blueprint-status{color:#647269}.blueprint-warning,.generation-warnings{color:#a45340}.generation-warnings{padding-left:18px}.generate:disabled{cursor:not-allowed;opacity:.55}
+.design-upload{cursor:pointer}.design-upload input{display:none}.design-upload-add{margin-left:auto;border:0;background:#e4f0df;color:var(--green);width:22px;height:22px;border-radius:50%;display:grid;place-items:center}.blueprint-status,.blueprint-warning,.generation-warnings{margin:12px 0 0;font-size:13px;line-height:1.5}.blueprint-status{color:#647269}.blueprint-warning,.generation-warnings{color:#a45340}.generation-warnings{padding-left:18px}.generate:disabled{cursor:default;opacity:.55}
 
 /* Extended Features Styles */
 .topic-search-input { width: 100%; border: 1px solid #dfe6df; border-radius: 5px; padding: 7px 11px; font-size: 13px; margin-top: 10px; background: white; color: var(--ink); box-sizing: border-box; }
@@ -135,5 +135,31 @@ label.back-button.disabled { opacity: .55; pointer-events: none; }
 .sync-nudge { margin: 2px 0 0 38px; border: 1px solid #ecd6b0; background: #fbf4e8; color: #7a5320; border-radius: 5px; padding: 6px 9px; font-size: 12px; text-align: left; cursor: pointer; }
 .sync-auto-note { font-size: 12px; color: #6f7d75; line-height: 1.5; }
 .pattern-builder { max-width: 680px; }
-.pattern-row-custom .pattern-label-input { flex: 1 1 140px; min-width: 120px; }
-.pattern-row-custom input[type="number"] { width: 68px; flex: none; text-align: center; }
+.step:disabled { cursor: default; opacity: .5; }
+
+/* Pattern rows: one grid for the headings and every row, so columns line up, with inputs styled like the rest of the form. */
+.pattern-grid { display: grid; grid-template-columns: minmax(120px, 1fr) 64px 30px 64px 40px 62px 108px 20px; align-items: center; column-gap: 8px; }
+.pattern-labels.pattern-grid { margin-bottom: 6px; font-size: 12px; color: #98a39b; }
+.pattern-labels.pattern-grid span:nth-child(2), .pattern-labels.pattern-grid span:nth-child(4) { text-align: center; }
+.pattern-row-custom.pattern-grid { margin-bottom: 9px; }
+.pattern-row-custom .pattern-label-input { min-width: 0; width: 100%; }
+.pattern-row-custom input[type="number"] { width: 100%; border: 1px solid #dfe6df; border-radius: 4px; background: white; color: var(--ink); font: inherit; font-size: 13px; padding: 7px 6px; text-align: center; }
+.pattern-row-custom > span { font-size: 13px; color: #7f8b82; white-space: nowrap; }
+/* Narrow screens: section name on its own line, then the numbers, then the tickboxes and the remove button. */
+@media (max-width: 640px) {
+  .pattern-labels.pattern-grid { display: none; }
+  .pattern-row-custom.pattern-grid { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding-bottom: 12px; border-bottom: 1px solid #edf0ec; }
+  .pattern-row-custom .pattern-label-input { flex: 1 1 100%; }
+  .pattern-row-custom input[type="number"] { width: 60px; }
+  .pattern-row-custom .pattern-delete-btn { margin-left: auto; }
+}
+.duration-field input { font: inherit; font-size: 13px; }
+
+/* Fifth difficulty: "Mixed" draws questions from every level. */
+.difficulty-options { grid-template-columns: repeat(5, 1fr); }
+.difficulty.mixed { color: #9a7bb0; }
+@media (max-width: 680px) { .difficulty-options { grid-template-columns: repeat(2, 1fr); } }
+
+/* Steps 2-4 keep the step number outside the title block, so keep both on the left with the sentence under the title. */
+.mini-title { justify-content: flex-start; align-items: baseline; }
+.mini-title p { margin-left: 0; }
